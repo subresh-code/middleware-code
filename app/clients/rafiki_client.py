@@ -3,7 +3,8 @@ import hmac
 import hashlib
 import requests
 from typing import Optional
-from app.config import settings
+from app.config import get_settings
+_settings = get_settings()
 
 
 class RafikiClient:

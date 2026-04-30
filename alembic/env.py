@@ -1,5 +1,5 @@
 from logging.config import fileConfig
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import engine_from_config, pool, create_engine
 from alembic import context
 import sys
 import os
@@ -9,14 +9,16 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
 
 config = context.config
 
-# Import config — handle missing env vars gracefully
-try:
-    from app.config import settings
-    # Set the database URL from settings
-    config.set_main_option("sqlalchemy.url", settings.database_url)
-except Exception:
-    # If settings can't load, use the ini file value
-    pass
+# Set database URL from environment or ini file
+database_url = os.environ.get("DATABASE_URL")
+if not database_url:
+    # Try to get from config file
+    database_url = config.get_main_option("sqlalchemy.url")
+
+if not database_url:
+    raise ValueError("DATABASE_URL not set in environment or alembic.ini")
+
+config.set_main_option("sqlalchemy.url", database_url)
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
@@ -43,9 +45,8 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 def run_migrations_online() -> None:
-    connectable = engine_from_config(
-        config.get_section(config.config_ini_section),
-        prefix="sqlalchemy.",
+    connectable = create_engine(
+        database_url,
         poolclass=pool.NullPool,
     )
 

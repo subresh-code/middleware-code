@@ -5,7 +5,8 @@ from sqlalchemy.orm import Session
 from app.db import get_db
 from app.state.machine import transition_payment, TriggeredBy, InvalidTransitionError
 from app.models.payment import PaymentTranslation, PaymentStatus
-from app.config import settings
+from app.config import get_settings
+_settings = get_settings()
 from app.clients.rafiki_client import RafikiClient
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])

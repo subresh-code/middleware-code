@@ -1,18 +1,25 @@
-from typing import Dict, Tuple
+from dataclasses import dataclass
 
-# Currency code (numeric 3-digit) → (assetCode, assetScale)
-CURRENCY_MAP: Dict[str, Tuple[str, int]] = {
-    "524": ("NPR", 2),  # Nepalese Rupee
-    "840": ("USD", 2),  # US Dollar
-    "356": ("INR", 2),  # Indian Rupee
+
+@dataclass(frozen=True)
+class CurrencyInfo:
+    asset_code: str
+    asset_scale: int
+
+
+CURRENCY_MAP: dict[str, CurrencyInfo] = {
+    "524": CurrencyInfo(asset_code="NPR", asset_scale=2),
+    "840": CurrencyInfo(asset_code="USD", asset_scale=2),
+    "356": CurrencyInfo(asset_code="INR", asset_scale=2),
 }
 
 
-def get_currency_info(currency_code: str) -> Tuple[str, int]:
-    """
-    Returns (assetCode, assetScale) for a given ISO 4217 numeric code.
-    Raises ValueError if unsupported.
-    """
-    if currency_code not in CURRENCY_MAP:
-        raise ValueError(f"Unsupported currency code: {currency_code}")
-    return CURRENCY_MAP[currency_code]
+def get_currency_info(iso_code: str) -> CurrencyInfo:
+    info = CURRENCY_MAP.get(iso_code)
+    if info is None:
+        supported = ", ".join(CURRENCY_MAP.keys())
+        raise ValueError(
+            f"Unsupported currency code '{iso_code}'. "
+            f"Supported codes: {supported}"
+        )
+    return info
