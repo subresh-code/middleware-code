@@ -1,6 +1,6 @@
 # Payment Middleware
 
-Middleware designed to translate ISO 20022 messages to ILP/Rafiki protocols.
+Middleware designed to translate ISO 8583 messages to ILP/Rafiki protocols.
 
 ## Tech Stack
 
