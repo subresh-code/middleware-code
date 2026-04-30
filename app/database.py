@@ -71,7 +71,10 @@ class Database:
 
 
 # Global database instance
-db = Database()
+# Use Docker's internal hostname when running in Docker, localhost for external access
+import os
+db_url = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/payments")
+db = Database(db_url)
 
 
 def get_db():

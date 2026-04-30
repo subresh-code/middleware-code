@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from typing import Optional
 import datetime
 
-from app.iso8583_parser import ISO8583Message, create_financial_request, create_response
+from app.iso8583_parser import create_financial_request, create_response, parse_iso_message, message_to_dict
 from app.rafiki_client import transfer_between_coops, MockRafikiClient
 from app.database import get_db, Transaction, db
 
@@ -49,8 +49,8 @@ async def process_iso8583_message(
         ISO 8583 response message
     """
     try:
-        # Create ISO 8583 financial request (MTI 0200)
-        iso_request = create_financial_request(
+        # Create ISO 8583 financial request (MTI 0200) using pyiso8583
+        iso_request_bytes, iso_request_decoded = create_financial_request(
             source_account=source_account,
             amount=amount,
             currency=currency,
@@ -60,15 +60,15 @@ async def process_iso8583_message(
         # Store transaction in database
         db_session = next(get_db())
         transaction = Transaction(
-            mti=iso_request.mti,
-            stan=iso_request.get_field(11),
-            rrn=iso_request.get_field(37),
+            mti=iso_request_decoded.get('t'),
+            stan=iso_request_decoded.get('11'),
+            rrn=iso_request_decoded.get('37'),
             source_account=source_account,
             source_coop_id=source_coop_id,
             dest_coop_wallet=dest_coop_wallet,
             amount=amount,
             currency=currency,
-            request_message=str(iso_request)
+            request_message=str(iso_request_decoded)
         )
         db_session.add(transaction)
         db_session.commit()
@@ -96,20 +96,23 @@ async def process_iso8583_message(
         transaction.response_code = result["response_code"]
         db_session.commit()
         
-        # Create ISO 8583 response
-        iso_response = create_response(
-            request_msg=iso_request,
+        # Create ISO 8583 response using pyiso8583
+        iso_response_bytes, iso_response_decoded = create_response(
+            request_decoded=iso_request_decoded,
             response_code=result["response_code"]
         )
         
+        # Convert to friendly format
+        response_dict = message_to_dict(iso_response_decoded)
+        
         # Add additional response fields
         if result.get("payment_id"):
-            iso_response.set_field(38, result["payment_id"][:6].zfill(6))  # Authorization code
+            iso_response_decoded['38'] = result["payment_id"][:6].zfill(6)  # Authorization code
         
         return {
-            "mti": iso_response.mti,
-            "fields": {k: v for k, v in iso_response.fields.items()},
-            "bitmap": iso_response.build_bitmap().to_hex(),
+            "mti": iso_response_decoded.get('t'),
+            "fields": response_dict['fields'],
+            "bitmap": iso_response_decoded.get('p'),
             "transaction_id": transaction.id,
             "success": result["success"],
             "message": "Transfer completed" if result["success"] else result.get("error")
@@ -199,16 +202,13 @@ async def list_transactions(
 @app.post("/iso8583/parse", tags=["ISO 8583"])
 async def parse_iso8583_hex(hex_data: str):
     """
-    Parse raw ISO 8583 message from hex string.
+    Parse raw ISO 8583 message from hex string using pyiso8583.
     Useful for debugging incoming messages.
     """
     try:
         data = bytes.fromhex(hex_data)
-        msg = ISO8583Message.from_iso_format(data)
-        return {
-            "mti": msg.mti,
-            "fields": {k: v for k, v in msg.fields.items()},
-            "bitmap": msg.bitmap.to_hex() if msg.bitmap else None
-        }
+        decoded, encoded = parse_iso_message(data)
+        result = message_to_dict(decoded)
+        return result
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Parse error: {str(e)}")
