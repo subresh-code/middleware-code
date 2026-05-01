@@ -1,0 +1,235 @@
+{
+  "info": {
+    "name": "Payment Middleware API",
+    "description": "API collection for testing Payment Middleware with ISO 8583 and Rafiki integration",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "base_url",
+      "value": "http://localhost:8000"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health Check",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/health",
+            "description": "Check if the API is running"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Wallet Mappings",
+      "item": [
+        {
+          "name": "List Wallet Mappings",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/wallets",
+            "description": "List all cooperative to wallet URL mappings"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "ISO 8583 Processing",
+      "item": [
+        {
+          "name": "Process ISO 8583 Transfer (Mock)",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/iso8583/process",
+            "query": [
+              {
+                "key": "source_account",
+                "value": "1234567890123456",
+                "description": "Source account number (ISO Field 2)"
+              },
+              {
+                "key": "amount",
+                "value": "100.50",
+                "description": "Transfer amount"
+              },
+              {
+                "key": "currency",
+                "value": "840",
+                "description": "Currency code (ISO 4217)"
+              },
+              {
+                "key": "source_coop_id",
+                "value": "001234",
+                "description": "Source cooperative ID"
+              },
+              {
+                "key": "dest_coop_id",
+                "value": "005678",
+                "description": "Destination cooperative ID"
+              },
+              {
+                "key": "use_mock",
+                "value": "true",
+                "description": "Use mock Rafiki client"
+              }
+            ],
+            "description": "Process ISO 8583 financial request with mock Rafiki"
+          },
+          "response": []
+        },
+        {
+          "name": "Process ISO 8583 Transfer (Real Rafiki)",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/iso8583/process",
+            "query": [
+              {
+                "key": "source_account",
+                "value": "1234567890123456"
+              },
+              {
+                "key": "amount",
+                "value": "100.50"
+              },
+              {
+                "key": "currency",
+                "value": "840"
+              },
+              {
+                "key": "source_coop_id",
+                "value": "001234"
+              },
+              {
+                "key": "dest_coop_id",
+                "value": "005678"
+              },
+              {
+                "key": "use_mock",
+                "value": "false"
+              },
+              {
+                "key": "rafiki_url",
+                "value": "http://your-rafiki-server"
+              }
+            ],
+            "description": "Process with real Rafiki server"
+          },
+          "response": []
+        },
+        {
+          "name": "Parse ISO 8583 Message",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/iso8583/parse",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"hex_data\": \"3032303072303030303030303030303030303030313631323334353637383930313233343536303030303030303030303030303130303530\"\n}"
+            },
+            "description": "Parse raw ISO 8583 hex message"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Simplified Transfer",
+      "item": [
+        {
+          "name": "Initiate Transfer",
+          "request": {
+            "method": "POST",
+            "url": "{{base_url}}/transfer",
+            "query": [
+              {
+                "key": "source_account",
+                "value": "1234567890123456"
+              },
+              {
+                "key": "amount",
+                "value": "250.75"
+              },
+              {
+                "key": "dest_coop_wallet",
+                "value": "http://localhost:3001/bob"
+              },
+              {
+                "key": "currency",
+                "value": "840"
+              },
+              {
+                "key": "source_coop_id",
+                "value": "001234"
+              },
+              {
+                "key": "use_mock",
+                "value": "true"
+              }
+            ],
+            "description": "Simplified transfer endpoint (handles ISO 8583 internally)"
+          },
+          "response": []
+        }
+      ]
+    },
+    {
+      "name": "Transactions",
+      "item": [
+        {
+          "name": "List All Transactions",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/transactions",
+            "query": [
+              {
+                "key": "skip",
+                "value": "0"
+              },
+              {
+                "key": "limit",
+                "value": "100"
+              }
+            ],
+            "description": "List transactions with pagination"
+          },
+          "response": []
+        },
+        {
+          "name": "List by Status",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/transactions",
+            "query": [
+              {
+                "key": "status",
+                "value": "COMPLETED"
+              }
+            ],
+            "description": "Filter transactions by status"
+          },
+          "response": []
+        },
+        {
+          "name": "Get Transaction by ID",
+          "request": {
+            "method": "GET",
+            "url": "{{base_url}}/transactions/1",
+            "description": "Get specific transaction details"
+          },
+          "response": []
+        }
+      ]
+    }
+  ]
+}
