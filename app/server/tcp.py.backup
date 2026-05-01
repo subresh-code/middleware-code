@@ -33,7 +33,7 @@ class TcpServer:
         self._connection_counts: dict[str, int] = {}
         self._lock = asyncio.Lock()
 
-    def _build_response(self, mti: str, de39: str, stan: str, frame_length_type: int) -> bytes:
+    def _make_error_response(self, mti: str, de39: str, stan: str, frame_length_type: int) -> bytes:
         """Build a proper ISO 8583 0210/0410 error response."""
         response_mti = "0210" if mti == "0200" else "0410"
         try:
@@ -133,7 +133,7 @@ class TcpServer:
                             "ASE '%s' sent oversized message: %d bytes",
                             ase_name, msg_len,
                         )
-                        error_response = self._build_response("0200", "30", "000000", frame_length_type)
+                        error_response = self._make_error_response("0200", "30", "000000", frame_length_type)
                         writer.write(error_response)
                         await writer.drain()
                         continue
@@ -158,7 +158,7 @@ class TcpServer:
                         msg = parse_iso8583(full_frame, frame_length_type)
                     except ParseError as e:
                         logger.warning("ASE '%s' parse error: %s", ase_name, e)
-                        error_response = self._build_response(
+                        error_response = self._make_error_response(
                             msg.mti if 'msg' in locals() else '0200',
                             "30", "000000", frame_length_type,
                         )
@@ -178,9 +178,8 @@ class TcpServer:
                                 currency=msg.de49,
                                 stan=msg.de11,
                                 rrn=msg.de37,
-                                processing_code=msg.de3,
-                                terminal_id=msg.de41,
                             )
+                            db.add(payment)
                             db.commit()
                             db.refresh(payment)
 
@@ -210,107 +209,10 @@ class TcpServer:
                                 "Translation complete",
                             )
 
-                            # ── Call Rafiki ───────────────────────────────────────────
-                            from app.clients.rafiki_client import RafikiClient
-                            from datetime import timezone
-
-                            rafiki = RafikiClient()
-
-                            # Step 1: verify wallet exists in Rafiki
-                            try:
-                                await rafiki.get_wallet_address(result.wallet_address)
-                            except Exception as e:
-                                logger.error("Wallet not found in Rafiki: %s", e)
-                                transition_payment(
-                                    db, payment.id, PaymentStatus.FAILED,
-                                    TriggeredBy.SYSTEM, f"Wallet not found: {e}"
-                                )
-                                writer.write(self._build_response(msg.mti, "14", msg.de11, frame_length_type))
-                                await writer.drain()
-                                continue
-
-                            # Step 2: create incoming payment
-                            try:
-                                incoming_payment_url = await rafiki.create_incoming_payment(
-                                    wallet_address=result.wallet_address,
-                                    amount_ilp_uint64=result.amount_ilp_uint64,
-                                    asset_code=result.asset_code,
-                                    asset_scale=result.asset_scale,
-                                    expires_at=result.expires_at.isoformat(),
-                                    external_ref=msg.de11,
-                                )
-                            except Exception as e:
-                                logger.error("create_incoming_payment failed: %s", e)
-                                transition_payment(
-                                    db, payment.id, PaymentStatus.FAILED,
-                                    TriggeredBy.SYSTEM, f"Rafiki incoming payment failed: {e}"
-                                )
-                                writer.write(self._build_response(msg.mti, "96", msg.de11, frame_length_type))
-                                await writer.drain()
-                                continue
-
-                            # Step 3: create outgoing payment
-                            try:
-                                rafiki_payment_id = await rafiki.create_outgoing_payment(
-                                    wallet_address=result.source_wallet_address,
-                                    incoming_payment_url=incoming_payment_url,
-                                    amount_ilp_uint64=result.amount_ilp_uint64,
-                                    asset_code=result.asset_code,
-                                    asset_scale=result.asset_scale,
-                                    external_ref=msg.de11,
-                                )
-                            except Exception as e:
-                                logger.error("create_outgoing_payment failed: %s", e)
-                                transition_payment(
-                                    db, payment.id, PaymentStatus.FAILED,
-                                    TriggeredBy.SYSTEM, f"Rafiki outgoing payment failed: {e}"
-                                )
-                                writer.write(self._build_response(msg.mti, "96", msg.de11, frame_length_type))
-                                await writer.drain()
-                                continue
-
-                            # Store Rafiki payment ID and transition to ILP_PREPARED
-                            payment.rafiki_payment_id = rafiki_payment_id
-                            db.commit()
-                            transition_payment(
-                                db, payment.id, PaymentStatus.ILP_PREPARED,
-                                TriggeredBy.TRANSLATION_JOB, "Rafiki payment created"
-                            )
-
-                            # ── Wait for webhook ──────────────────────────────────────
-                            event = asyncio.Event()
-                            pending_payments[msg.de11] = event
-
-                            try:
-                                await asyncio.wait_for(event.wait(), timeout=30.0)
-                            except asyncio.TimeoutError:
-                                logger.warning("Webhook timeout for STAN %s", msg.de11)
-                                transition_payment(
-                                    db, payment.id, PaymentStatus.FAILED,
-                                    TriggeredBy.SYSTEM, "Webhook timeout"
-                                )
-                                payment.failure_reason = "webhook timeout"
-                                payment.response_code = "68"
-                                db.commit()
-                                writer.write(self._build_response(msg.mti, "68", msg.de11, frame_length_type))
-                                await writer.drain()
-                                continue
-                            finally:
-                                pending_payments.pop(msg.de11, None)
-
-                            # ── Build final response based on payment state ───────────
-                            db.refresh(payment)
-
-                            if payment.status == PaymentStatus.ILP_FULFILLED:
-                                payment.response_code = "00"
-                                db.commit()
-                                writer.write(self._build_response(msg.mti, "00", msg.de11, frame_length_type))
-                            else:
-                                payment.response_code = "05"
-                                db.commit()
-                                writer.write(self._build_response(msg.mti, "05", msg.de11, frame_length_type))
-
-                            await writer.drain()
+                            # Send approved response — DE39=00
+                            response = self._make_error_response(
+                                msg.mti, "00", msg.de11, frame_length_type)
+                            writer.write(response)
                             await writer.drain()
 
                         except (WalletResolutionError, InvalidTransitionError, ValueError) as e:
@@ -326,7 +228,7 @@ class TcpServer:
                                     )
                                 except Exception:
                                     pass
-                            error_response = self._build_response(
+                            error_response = self._make_error_response(
                                 msg.mti if 'msg' in locals() else '0200',
                                 "96", msg.de11 if 'msg' in locals() else "000000", frame_length_type,
                             )

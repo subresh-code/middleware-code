@@ -9,14 +9,14 @@ services:
       - "9000:9000"
     depends_on:
       - db
-    environment:
-      DATABASE_URL: postgresql://postgres:postgres@db:5432/payments
-      RAFIKI_API_URL: http://localhost:3000
-      RAFIKI_AUTH_TOKEN: dummy_token_for_now
-      RAFIKI_WEBHOOK_SECRET: dummy_secret_for_now
+    env_file:
+      - .env
     volumes:
       - .:/app
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    networks:
+      - middleware-internal
+      - rafiki-shared
 
   db:
     image: postgres:15
@@ -25,9 +25,22 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: payments
-
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    networks:
+      - middleware-internal
+
+  redis:
+    image: redis:7-alpine
+    container_name: payment_redis
+    networks:
+      - middleware-internal
+
+networks:
+  middleware-internal:
+    driver: bridge
+  rafiki-shared:
+    external: true
 
 volumes:
   postgres_data:
