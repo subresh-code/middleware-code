@@ -12,6 +12,7 @@ from app.models.payment import (
 from app.parser.iso8583 import ParseError, encode_iso8583_response, parse_iso8583
 from app.state.machine import InvalidTransitionError, transition_payment
 from app.translation.core import WalletResolutionError, translate, resolve_wallet
+from app.middleware.rate_limiter import check_rate_limit
 
 
 logger = logging.getLogger(__name__)
@@ -187,6 +188,13 @@ class TcpServer:
                             "30", "000000", frame_length_type,
                         )
                         writer.write(error_response)
+                        await writer.drain()
+                        continue
+
+                    # ── Rate limit check ─────────────────────────────────
+                    if not check_rate_limit(ase_name):
+                        logger.warning("ASE '%s' rate limit exceeded", ase_name)
+                        writer.write(self._make_error_response(msg.mti, "03", msg.de11, frame_length_type))
                         await writer.drain()
                         continue
 
