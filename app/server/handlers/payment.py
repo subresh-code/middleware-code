@@ -105,7 +105,7 @@ async def handle_0200(
         try:
             incoming = await rafiki.create_incoming_payment(
                 wallet_address=result.wallet_address,
-                amount_ilp_uint64=result.amount_ilp_uint64,
+                amount_value=result.amount_ilp_uint64,
                 asset_code=result.asset_code,
                 asset_scale=result.asset_scale,
                 expires_at=result.expires_at.isoformat(),
@@ -129,20 +129,55 @@ async def handle_0200(
             "Incoming payment created",
         )
 
-        # ── Create Outgoing Payment (ILP Transfer) ────────
+        # ── Create Quote ───────────────────────────────────────────
         try:
-            outgoing = await rafiki.create_outgoing_payment(
-                incoming_payment_id=payment.rafiki_payment_id,
-                amount_ilp_uint64=result.amount_ilp_uint64,
+            await rafiki.create_quote(
+                wallet_address=result.wallet_address,
+                incoming_payment_url=payment.rafiki_payment_id,
+                amount_value=result.amount_ilp_uint64,
                 asset_code=result.asset_code,
                 asset_scale=result.asset_scale,
-                external_ref=msg.de11,
+            )
+        except Exception as e:
+            logger.error("0200 quote creation failed: %s", e)
+            transition_payment(
+                db, payment.id, PaymentStatus.FAILED,
+                TriggeredBy.SYSTEM, f"Rafiki quote failed: {e}"
+            )
+            writer.write(self._make_error_response(msg.mti, "96", msg.de11, frame_length_type))
+            await writer.drain()
+            return
+
+        # ── Create Outgoing Payment (ILP Transfer) ───────────────
+        try:
+            outgoing = await rafiki.create_outgoing_payment(
+                wallet_address=result.wallet_address,
+                incoming_payment_url=payment.rafiki_payment_id,
+                amount_value=result.amount_ilp_uint64,
+                asset_code=result.asset_code,
+                asset_scale=result.asset_scale,
+                stan=msg.de11,
             )
         except Exception as e:
             logger.error("0200 outgoing payment failed: %s", e)
             transition_payment(
                 db, payment.id, PaymentStatus.FAILED,
                 TriggeredBy.SYSTEM, f"Rafiki outgoing payment failed: {e}"
+            )
+            writer.write(self._make_error_response(msg.mti, "96", msg.de11, frame_length_type))
+            await writer.drain()
+            return
+
+        # ── Deposit Liquidity (Funding) ──────────────────────────
+        try:
+            # We use the outgoing payment ID returned by Rafiki
+            outgoing_id = outgoing.get("id") or outgoing.get("url")
+            await rafiki.deposit_outgoing_payment_liquidity(outgoing_id)
+        except Exception as e:
+            logger.error("0200 liquidity deposit failed: %s", e)
+            transition_payment(
+                db, payment.id, PaymentStatus.FAILED,
+                TriggeredBy.SYSTEM, f"Rafiki funding failed: {e}"
             )
             writer.write(self._make_error_response(msg.mti, "96", msg.de11, frame_length_type))
             await writer.drain()
@@ -206,8 +241,8 @@ async def handle_0200(
                     TriggeredBy.SYSTEM,
                     str(e),
                 )
-            except Exception:
-                pass
+                            except Exception:
+                                logger.exception("Critical failure during payment FAILED transition")
         writer.write(self._make_error_response(msg.mti, "14", msg.de11, frame_length_type))
         await writer.drain()
     except (InvalidTransitionError, ValueError) as e:
@@ -221,7 +256,7 @@ async def handle_0200(
                     TriggeredBy.SYSTEM,
                     str(e),
                 )
-            except Exception:
-                pass
+                            except Exception:
+                                logger.exception("Critical failure during payment FAILED transition")
         writer.write(self._make_error_response(msg.mti, "96", msg.de11, frame_length_type))
         await writer.drain()

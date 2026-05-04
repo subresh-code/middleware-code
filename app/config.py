@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     rafiki_api_url: str = Field(..., alias="RAFIKI_API_URL")
     rafiki_auth_token: str = Field(..., alias="RAFIKI_AUTH_TOKEN")
     rafiki_webhook_secret: str = Field(..., alias="RAFIKI_WEBHOOK_SECRET")
+    rafiki_tenant_id: str = Field(..., alias="RAFIKI_TENANT_ID")
+    rafiki_admin_api_secret: str = Field(..., alias="RAFIKI_ADMIN_API_SECRET")
 
     # ── ISO 8583 Parser ──────────────────────────────────────────────────────
     iso8583_header_length: int = Field(2, alias="ISO8583_HEADER_LENGTH")

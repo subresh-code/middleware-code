@@ -43,12 +43,8 @@ async def handle_balance_inquiry(
             """,
             "variables": {"url": wallet_address}
         }
-        # Wrap sync requests call in executor to avoid blocking event loop
-        loop = asyncio.get_running_loop()
-        resp = await loop.run_in_executor(
-            None,
-            lambda: rafiki._request_with_retry("POST", "/graphql", json=query)
-        )
+        
+        resp = await rafiki._request_with_retry("POST", "/graphql", json=query)
         data = resp.json()
 
         wallet_data = data.get("data", {}).get("walletAddressByUrl")

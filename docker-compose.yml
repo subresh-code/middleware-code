@@ -9,8 +9,10 @@ services:
       - "9000:9000"
     depends_on:
       - db
+      - redis
     environment:
       DATABASE_URL: postgresql://postgres:postgres@db:5432/payments
+      REDIS_URL: redis://redis:6379/0
       RAFIKI_API_URL: http://localhost:3000
       RAFIKI_AUTH_TOKEN: dummy_token_for_now
       RAFIKI_WEBHOOK_SECRET: dummy_secret_for_now
@@ -26,8 +28,14 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: payments
 
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
+     volumes:
+       - postgres_data:/var/lib/postgresql/data
 
-volumes:
-  postgres_data:
+  redis:
+    image: redis:alpine
+    container_name: payment_redis
+    ports:
+      - "6379:6379"
+
+ volumes:
+   postgres_data:

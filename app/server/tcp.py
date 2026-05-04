@@ -165,68 +165,25 @@ class TcpServer:
                         await writer.drain()
                         continue
 
-                    # ── Process payment ───────────────────────────────────────
+                    # ── Process message ───────────────────────────────────────
                     async with get_db_session() as db:
                         try:
-                            # Create payment record with raw fields only
-                            payment = PaymentTranslation(
-                                ase_name=ase_name,
-                                raw_message=msg.raw_hex,
-                                mti=msg.mti,
-                                status=PaymentStatus.RECEIVED,
-                                currency=msg.de49,
-                                stan=msg.de11,
-                                rrn=msg.de37,
-                            )
-                            db.add(payment)
-                            db.commit()
-                            db.refresh(payment)
-
-                            # Transition to TRANSLATING
-                            transition_payment(
-                                db, payment.id,
-                                PaymentStatus.TRANSLATING,
-                                TriggeredBy.ASE_INBOUND,
-                                "Received from ASE",
-                            )
-
-                            # Run translation
-                            result = translate(db, msg, ase_name, settings.payment_ttl_seconds)
-
-                            # Update payment with translation results
-                            payment.wallet_address = result.wallet_address
-                            payment.amount_ilp_uint64 = result.amount_ilp_uint64
-                            payment.amount_value = result.amount_ilp_uint64 / (10 ** result.asset_scale)
-                            payment.expires_at = result.expires_at
-                            db.commit()
-
-                            # Transition to TRANSLATED
-                            transition_payment(
-                                db, payment.id,
-                                PaymentStatus.TRANSLATED,
-                                TriggeredBy.TRANSLATION_JOB,
-                                "Translation complete",
-                            )
-
-                            # Send approved response — DE39=00
-                            response = self._make_error_response(
-                                msg.mti, "00", msg.de11, frame_length_type)
-                            writer.write(response)
-                            await writer.drain()
-
-                        except (WalletResolutionError, InvalidTransitionError, ValueError) as e:
-                            logger.error("Payment processing error for ASE '%s': %s", ase_name, e)
-                            db.rollback()
-                            if 'payment' in locals():
-                                try:
-                                    transition_payment(
-                                        db, payment.id,
-                                        PaymentStatus.FAILED,
-                                        TriggeredBy.SYSTEM,
-                                        str(e),
-                                    )
-                                except Exception:
-                                    pass
+                            if msg.mti == "0200":
+                                from app.server.handlers.payment import handle_0200
+                                await handle_0200(self, db, msg, ase_name, settings, frame_length_type, writer)
+                            elif msg.mti == "0400":
+                                from app.server.handlers.reversal import handle_0400
+                                await handle_0400(self, db, msg, ase_name, frame_length_type, writer)
+                            elif msg.de3.startswith("31"):
+                                from app.server.handlers.balance import handle_balance_inquiry
+                                await handle_balance_inquiry(self, db, msg, ase_name, frame_length_type, writer)
+                            else:
+                                logger.warning("ASE '%s' sent unsupported MTI/code: %s", ase_name, msg.mti)
+                                error_response = self._make_error_response(msg.mti, "96", msg.de11, frame_length_type)
+                                writer.write(error_response)
+                                await writer.drain()
+                        except Exception as e:
+                            logger.exception("Handler error for ASE '%s': %s", ase_name, e)
                             error_response = self._make_error_response(
                                 msg.mti if 'msg' in locals() else '0200',
                                 "96", msg.de11 if 'msg' in locals() else "000000", frame_length_type,
@@ -248,7 +205,7 @@ class TcpServer:
                 writer.close()
                 await writer.wait_closed()
             except Exception:
-                pass
+                logger.exception("Error closing TCP connection")
 
     async def start(self):
         from app.config import get_settings

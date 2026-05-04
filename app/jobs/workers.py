@@ -1,9 +1,20 @@
+import logging
 from sqlalchemy.orm import Session
 from app.db import SessionLocal
 from app.models.payment import PaymentTranslation, PaymentStatus, SettlementBatch, BatchStatus
 from datetime import datetime, timezone
 from app.config import settings
 
+logger = logging.getLogger(__name__)
+
+def submit_batch_to_connectips(batch: SettlementBatch) -> bool:
+    """
+    Mock submission to ConnectIPS.
+    In production, this would be an API call.
+    """
+    logger.info("Submitting batch %d for %s to ConnectIPS...", batch.id, batch.ase_name)
+    # Simulate success
+    return True
 
 def run_settlement_job():
     """
@@ -24,7 +35,7 @@ def run_settlement_job():
         )
 
         if not payments:
-            print("No payments to settle")
+            logger.info("No payments to settle")
             return
 
         # Group by ASE
@@ -44,16 +55,22 @@ def run_settlement_job():
             db.add(batch)
             db.flush()
 
-            for p in ase_payments:
-                p.settlement_batch_id = batch.id
-                p.status = PaymentStatus.SETTLED
+            # ── Submit batch before marking payments as settled ──
+            if submit_batch_to_connectips(batch):
+                batch.status = BatchStatus.SUBMITTED
+                for p in ase_payments:
+                    p.settlement_batch_id = batch.id
+                    p.status = PaymentStatus.SETTLED
+                logger.info("Batch %d submitted and payments settled for %s", batch.id, ase_name)
+            else:
+                batch.status = BatchStatus.FAILED
+                logger.error("Failed to submit batch %d for %s", batch.id, ase_name)
 
             db.commit()
-            print(f"Created settlement batch {batch.id} for {ase_name}: {len(ase_payments)} payments")
 
     except Exception as e:
         db.rollback()
-        print(f"Settlement job failed: {e}")
+        logger.exception("Settlement job failed: %s", e)
     finally:
         db.close()
 

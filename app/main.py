@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from app.routes import health, inbound, webhook
 from app.server.tcp import tcp_server
+from app.jobs.scheduler import start_scheduler, stop_scheduler
 from app.config import get_settings
 
 @asynccontextmanager
@@ -13,9 +14,11 @@ async def lifespan(app: FastAPI):
     server_task = asyncio.create_task(
         tcp_server.start()
     )
+    start_scheduler()
     print(f"TCP server starting on {settings.tcp_host}:{settings.tcp_port}")
     yield
     # Shutdown
+    stop_scheduler()
     tcp_server.stop()
     server_task.cancel()
     try:

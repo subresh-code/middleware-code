@@ -40,9 +40,13 @@ def register_ase(
 
 
 @router.get("/ases")
-def list_ases(db: Session = Depends(get_db)):
+def list_ases(
+    limit: int = 100,
+    offset: int = 0,
+    db: Session = Depends(get_db),
+):
     """List all registered ASEs."""
-    ase_list = db.query(AseRegistry).all()
+    ase_list = db.query(AseRegistry).offset(offset).limit(limit).all()
     return [
         {"id": a.id, "ase_name": a.ase_name, "active": a.active,
          "max_connections": a.max_connections, "frame_length_type": a.frame_length_type}
@@ -137,13 +141,15 @@ def create_mapping(
 @router.get("/mappings")
 def list_mappings(
     ase_name: str = None,
+    limit: int = 100,
+    offset: int = 0,
     db: Session = Depends(get_db),
 ):
     """List account-wallet mappings, optionally filtered by ASE."""
     q = db.query(AccountWalletMapping)
     if ase_name:
         q = q.filter(AccountWalletMapping.ase_name == ase_name)
-    mappings = q.all()
+    mappings = q.offset(offset).limit(limit).all()
     return [
         {
             "id": m.id,
