@@ -8,7 +8,7 @@ from app.db import SessionLocal
 from app.models.payment import AseRegistry, PaymentStatus, PaymentTranslation, TriggeredBy
 from app.parser.iso8583 import ParseError, encode_iso8583_response, parse_iso8583
 from app.state.machine import InvalidTransitionError, transition_payment
-from app.translation.core import WalletResolutionError, translate
+from app.translation.core import WalletResolutionError, translate, resolve_wallet
 
 
 logger = logging.getLogger(__name__)
@@ -358,6 +358,73 @@ class TcpServer:
                                 db.rollback()
                                 writer.write(self._build_response("0100", "96", msg.de11, frame_length_type))
                                 await writer.drain()
+                        continue
+
+                    # ── Handle Balance Inquiry (DE3 starts with "31") ────────
+                    if msg.de3 and msg.de3.startswith("31"):
+                        async with get_db_session() as db:
+                            try:
+                                # Resolve wallet from DE103 (destination account)
+                                wallet_address = resolve_wallet(db, ase_name, msg.de103)
+                                rafiki = RafikiClient()
+
+                                # Query Rafiki for wallet balance via GraphQL
+                                query = {
+                                    "query": """
+                                        query GetWalletBalance($url: String!) {
+                                            walletAddressByUrl(url: $url) {
+                                                id
+                                                asset {
+                                                    code
+                                                    scale
+                                                }
+                                                balance
+                                            }
+                                        }
+                                    """,
+                                    "variables": {"url": wallet_address}
+                                }
+                                resp = rafiki._request_with_retry("POST", "/graphql", json=query)
+                                data = resp.json()
+
+                                wallet_data = data.get("data", {}).get("walletAddressByUrl")
+                                if not wallet_data:
+                                    writer.write(self._build_response(msg.mti, "14", msg.de11, frame_length_type))
+                                    await writer.drain()
+                                    continue
+
+                                # Build response with balance in DE4
+                                # Balance is in UInt64 format, convert to 12-digit DE4
+                                balance_raw = int(wallet_data.get("balance", 0))
+                                asset_scale = wallet_data.get("asset", {}).get("scale", 2)
+                                # Convert UInt64 to display value, then to 12-digit
+                                display_value = balance_raw / (10 ** asset_scale)
+                                de4_balance = f"{int(display_value * 100):012d}"
+
+                                response_fields = {
+                                    "39": "00",
+                                    "11": msg.de11,
+                                    "4": de4_balance,
+                                }
+                                response_mti = "0210" if msg.mti == "0200" else "0110"
+                                try:
+                                    balance_response = encode_iso8583_response(
+                                        mti=response_mti,
+                                        fields=response_fields,
+                                        header_len=frame_length_type,
+                                    )
+                                    writer.write(balance_response)
+                                except Exception:
+                                    writer.write(self._build_response(msg.mti, "96", msg.de11, frame_length_type))
+
+                            except WalletResolutionError as e:
+                                logger.warning("Balance inquiry wallet not found: %s", e)
+                                writer.write(self._build_response(msg.mti, "14", msg.de11, frame_length_type))
+                            except Exception as e:
+                                logger.error("Balance inquiry error: %s", e)
+                                writer.write(self._build_response(msg.mti, "96", msg.de11, frame_length_type))
+
+                            await writer.drain()
                         continue
 
                     # ── Process payment (0200) ───────────────────────────────

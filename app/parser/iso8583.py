@@ -5,7 +5,7 @@ from iso8583.specs import default_ascii as spec
 
 from app.parser.schemas.message import Iso8583Message
 
-SUPPORTED_MTI = {"0200", "0400", "0800", "0100"}
+SUPPORTED_MTI = {"0200", "0400", "0800", "0100"}  # 0200 also handles inquiry via DE3
 MANDATORY_FIELDS = {"4", "11", "37", "49", "102", "103"}
 
 
