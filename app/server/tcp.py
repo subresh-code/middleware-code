@@ -35,6 +35,8 @@ class TcpServer:
         # ase_name → current connection count
         self._connection_counts: dict[str, int] = {}
         self._lock = asyncio.Lock()
+        # ase_name → list of (reader, writer) tuples for outbound messages
+        self._connections: dict[str, list[tuple]] = {}
 
     def _make_error_response(self, mti: str, de39: str, stan: str, frame_length_type: int) -> bytes:
         """Build a proper ISO 8583 0210/0410 error response."""
@@ -114,6 +116,11 @@ class TcpServer:
                 self._connection_counts[ase_name] = current + 1
 
             logger.info("ASE '%s' connected from %s", ase_name, peername)
+
+            # Store connection for outbound messages (heartbeat)
+            if ase_name not in self._connections:
+                self._connections[ase_name] = []
+            self._connections[ase_name].append((reader, writer))
 
             # ── Step 4: message loop ──────────────────────────────────────
             try:
@@ -668,6 +675,12 @@ class TcpServer:
                 async with self._lock:
                     self._connection_counts[ase_name] = max(
                         0, self._connection_counts.get(ase_name, 1) - 1)
+                # Remove from connections list
+                if ase_name in self._connections:
+                    conns = self._connections[ase_name]
+                    self._connections[ase_name] = [
+                        (r, w) for (r, w) in conns if w != writer
+                    ]
                 logger.info("ASE '%s' disconnected from %s", ase_name, peername)
 
         except Exception as e:
@@ -678,6 +691,39 @@ class TcpServer:
                 await writer.wait_closed()
             except Exception:
                 pass
+
+
+    async def _send_heartbeat(self, writer, frame_length_type: int):
+        """Send 0800 echo request to ASE as heartbeat."""
+        try:
+            heartbeat = encode_iso8583_response(
+                mti="0800",
+                fields={"11": "000000"},
+                header_len=frame_length_type,
+            )
+            writer.write(heartbeat)
+            await writer.drain()
+        except Exception as e:
+            logger.warning("Failed to send heartbeat: %s", e)
+
+    async def start_heartbeat(self, ase_name: str, interval: float = 30.0):
+        """Periodically send heartbeat to all connections for an ASE."""
+        while True:
+            await asyncio.sleep(interval)
+            if ase_name in self._connections:
+                for (reader, writer) in self._connections[ase_name]:
+                    # Get frame_length_type from ASE registry
+                    from app.db import SessionLocal
+                    from app.models.payment import AseRegistry
+                    db = SessionLocal()
+                    try:
+                        ase = db.query(AseRegistry).filter(
+                            AseRegistry.ase_name == ase_name
+                        ).first()
+                        frame_len = ase.frame_length_type if ase else 2
+                    finally:
+                        db.close()
+                    await self._send_heartbeat(writer, frame_len)
 
     async def start(self):
         from app.config import get_settings
