@@ -7,6 +7,7 @@ from app.models.payment import (
 from datetime import datetime, timezone, timedelta
 from app.config import settings
 from app.state.machine import transition_payment, TriggeredBy, InvalidTransitionError
+from app.server.tcp import tcp_server
 
 
 def run_settlement_job():
@@ -54,6 +55,18 @@ def run_settlement_job():
 
             db.commit()
             print(f"Created settlement batch {batch.id} for {ase_name}: {len(ase_payments)} payments")
+
+            # Push settlement notification to ASE via TCP
+            try:
+                # Build minimal notification: batch ID and total amount
+                notification = f"SETTLEMENT|{batch.id}|{batch.total_amount}|{batch.payment_count}".encode()
+                # Send to all active connections for this ASE
+                # Note: In production, store pending notifications and push when ASE connects
+                print(f"Settlement notification for ASE '{ase_name}': batch {batch.id} ready")
+                # TCP push would require storing writer references per ASE
+                # For now, log the notification
+            except Exception as e:
+                print(f"Failed to notify ASE '{ase_name}' of settlement: {e}")
 
     except Exception as e:
         db.rollback()
