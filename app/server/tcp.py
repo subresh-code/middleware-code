@@ -165,6 +165,18 @@ class TcpServer:
                         await writer.drain()
                         continue
 
+                    # ── Handle 0800 Network Management (echo/heartbeat) ────
+                    if msg.mti == "0800":
+                        logger.info("ASE '%s' sent 0800 echo request", ase_name)
+                        echo_response = encode_iso8583_response(
+                            mti="0810",
+                            fields={"39": "00", "11": msg.de11},
+                            header_len=frame_length_type,
+                        )
+                        writer.write(echo_response)
+                        await writer.drain()
+                        continue
+
                     # ── Process payment ───────────────────────────────────────
                     async with get_db_session() as db:
                         try:
