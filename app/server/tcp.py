@@ -422,9 +422,101 @@ class TcpServer:
 
                                 wallet_data = data.get("data", {}).get("walletAddressByUrl")
                                 if not wallet_data:
-                                    writer.write(self._build_response(msg.mti, "14", msg.de11, frame_length_type))
+                                    writer.write(self._make_error_response(msg.mti, "14", msg.de11, frame_length_type))
                                     await writer.drain()
                                     continue
+
+                                # Build response with balance in DE4
+                                # Balance is in UInt64 format, convert to 12-digit DE4
+                                balance_raw = int(wallet_data.get("balance", 0))
+                                asset_scale = wallet_data.get("asset", {}).get("scale", 2)
+                                # Convert UInt64 to display value, then to 12-digit
+                                display_value = balance_raw / (10 ** asset_scale)
+                                de4_balance = f"{int(display_value * 100):012d}"
+
+                                response_fields = {
+                                    "39": "00",
+                                    "11": msg.de11,
+                                    "4": de4_balance,
+                                }
+                                response_mti = "0210" if msg.mti == "0200" else "0110"
+                                try:
+                                    balance_response = encode_iso8583_response(
+                                        mti=response_mti,
+                                        fields=response_fields,
+                                        header_len=frame_length_type,
+                                    )
+                                    writer.write(balance_response)
+                                except Exception:
+                                    writer.write(self._make_error_response(msg.mti, "96", msg.de11, frame_length_type))
+
+                            except WalletResolutionError as e:
+                                logger.warning("Balance inquiry wallet not found: %s", e)
+                                writer.write(self._make_error_response(msg.mti, "14", msg.de11, frame_length_type))
+                            except Exception as e:
+                                logger.error("Balance inquiry error: %s", e)
+                                writer.write(self._make_error_response(msg.mti, "96", msg.de11, frame_length_type))
+
+                            await writer.drain()
+                        continue
+
+                    # ── Handle Mini-Statement (DE3 starts with "38") ─────
+                    if msg.de3 and msg.de3.startswith("38"):
+                        async with get_db_session() as db:
+                            try:
+                                # Query last N payments for this ASE account
+                                from app.models.payment import PaymentTranslation, PaymentStatus
+
+                                statement_payments = (
+                                    db.query(PaymentTranslation)
+                                    .filter(
+                                        PaymentTranslation.ase_name == ase_name,
+                                        PaymentTranslation.mti == "0200",
+                                        PaymentTranslation.status == PaymentStatus.ILP_FULFILLED,
+                                    )
+                                    .order_by(PaymentTranslation.created_at.desc())
+                                    .limit(10)
+                                    .all()
+                                )
+
+                                if not statement_payments:
+                                    writer.write(self._make_error_response(msg.mti, "25", msg.de11, frame_length_type))
+                                    await writer.drain()
+                                    continue
+
+                                # Build mini-statement data for DE48 (additional data)
+                                # Format: each transaction on one line with date, amount, RRN
+                                lines = []
+                                for p in statement_payments:
+                                    date_str = p.created_at.strftime("%m%d") if p.created_at else "0000"
+                                    amount_str = f"{int(p.amount_value * 100):012d}" if p.amount_value else "000000000000"
+                                    rrn = p.rrn or "000000000000"
+                                    lines.append(f"{date_str}{amount_str}{rrn}")
+
+                                de48_data = "|".join(lines)[:255]  # Truncate to 255 chars
+
+                                response_fields = {
+                                    "39": "00",
+                                    "11": msg.de11,
+                                    "48": de48_data,
+                                }
+                                response_mti = "0210" if msg.mti == "0200" else "0110"
+                                try:
+                                    stmt_response = encode_iso8583_response(
+                                        mti=response_mti,
+                                        fields=response_fields,
+                                        header_len=frame_length_type,
+                                    )
+                                    writer.write(stmt_response)
+                                except Exception:
+                                    writer.write(self._make_error_response(msg.mti, "96", msg.de11, frame_length_type))
+
+                            except Exception as e:
+                                logger.error("Mini-statement error: %s", e)
+                                writer.write(self._make_error_response(msg.mti, "96", msg.de11, frame_length_type))
+
+                            await writer.drain()
+                        continue
 
                                 # Build response with balance in DE4
                                 # Balance is in UInt64 format, convert to 12-digit DE4
