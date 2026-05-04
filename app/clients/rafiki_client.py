@@ -1,9 +1,12 @@
 import time
 import hmac
 import hashlib
+import json
 import requests
-from typing import Optional
+from typing import Optional, Dict, Any
 from app.config import get_settings
+from app.clients.circuit_breaker import rafiki_breaker
+
 _settings = get_settings()
 
 
@@ -27,15 +30,19 @@ class RafikiClient:
     def _request_with_retry(
         self, method: str, path: str, max_retries: int = 3, **kwargs
     ) -> requests.Response:
-        """Retry with exponential backoff: 1s, 2s, 4s."""
-        for attempt in range(max_retries):
-            try:
-                return self._request(method, path, **kwargs)
-            except requests.RequestException as e:
-                if attempt == max_retries - 1:
-                    raise
-                backoff = 2 ** attempt  # 1, 2, 4
-                time.sleep(backoff)
+        """Retry with exponential backoff: 1s, 2s, 4s. Protected by circuit breaker."""
+        def _do_request():
+            for attempt in range(max_retries):
+                try:
+                    return self._request(method, path, **kwargs)
+                except requests.RequestException as e:
+                    if attempt == max_retries - 1:
+                        raise
+                    backoff = 2 ** attempt  # 1, 2, 4
+                    time.sleep(backoff)
+            raise requests.RequestException("Max retries exceeded")
+
+        return rafiki_breaker.call(_do_request)
 
     def get_wallet_address(self, wallet_address: str) -> dict:
         """Validate destination wallet exists in Rafiki."""
