@@ -242,6 +242,124 @@ class TcpServer:
                             await writer.drain()
                             continue
 
+                    # ── Handle 0100 Pre-Authorization ────────────────────────
+                    if msg.mti == "0100":
+                        async with get_db_session() as db:
+                            try:
+                                payment = PaymentTranslation(
+                                    ase_name=ase_name,
+                                    raw_message=msg.raw_hex,
+                                    mti=msg.mti,
+                                    status=PaymentStatus.RECEIVED,
+                                    currency=msg.de49,
+                                    stan=msg.de11,
+                                    rrn=msg.de37,
+                                    processing_code=msg.de3,
+                                    terminal_id=msg.de41,
+                                )
+                                db.add(payment)
+                                db.commit()
+                                db.refresh(payment)
+
+                                transition_payment(
+                                    db, payment.id,
+                                    PaymentStatus.TRANSLATING,
+                                    TriggeredBy.ASE_INBOUND,
+                                    "Pre-auth received from ASE",
+                                )
+
+                                result = translate(db, msg, ase_name, settings.payment_ttl_seconds)
+                                payment.wallet_address = result.wallet_address
+                                payment.amount_ilp_uint64 = result.amount_ilp_uint64
+                                payment.amount_value = result.amount_ilp_uint64 / (10 ** result.asset_scale)
+                                payment.expires_at = result.expires_at
+                                db.commit()
+
+                                transition_payment(
+                                    db, payment.id,
+                                    PaymentStatus.TRANSLATED,
+                                    TriggeredBy.TRANSLATION_JOB,
+                                    "Pre-auth translation complete",
+                                )
+
+                                rafiki = RafikiClient()
+                                try:
+                                    await rafiki.get_wallet_address(result.wallet_address)
+                                except Exception as e:
+                                    logger.error("Wallet not found for pre-auth: %s", e)
+                                    transition_payment(
+                                        db, payment.id, PaymentStatus.FAILED,
+                                        TriggeredBy.SYSTEM, f"Wallet not found: {e}"
+                                    )
+                                    writer.write(self._build_response("0100", "14", msg.de11, frame_length_type))
+                                    await writer.drain()
+                                    continue
+
+                                try:
+                                    incoming = await rafiki.create_incoming_payment(
+                                        wallet_address=result.wallet_address,
+                                        amount_ilp_uint64=result.amount_ilp_uint64,
+                                        asset_code=result.asset_code,
+                                        asset_scale=result.asset_scale,
+                                        expires_at=result.expires_at.isoformat(),
+                                        external_ref=msg.de11,
+                                    )
+                                except Exception as e:
+                                    logger.error("Pre-auth incoming payment failed: %s", e)
+                                    transition_payment(
+                                        db, payment.id, PaymentStatus.FAILED,
+                                        TriggeredBy.SYSTEM, f"Rafiki incoming payment failed: {e}"
+                                    )
+                                    writer.write(self._build_response("0100", "96", msg.de11, frame_length_type))
+                                    await writer.drain()
+                                    continue
+
+                                payment.rafiki_payment_id = str(incoming)
+                                db.commit()
+                                transition_payment(
+                                    db, payment.id, PaymentStatus.ILP_PREPARED,
+                                    TriggeredBy.TRANSLATION_JOB,
+                                    "Pre-auth: incoming payment created (funds reserved)",
+                                )
+
+                                # Pre-auth does NOT create outgoing payment
+                                # Wait for webhook confirmation
+                                event = asyncio.Event()
+                                pending_payments[msg.de11] = event
+                                try:
+                                    await asyncio.wait_for(event.wait(), timeout=30.0)
+                                except asyncio.TimeoutError:
+                                    transition_payment(
+                                        db, payment.id, PaymentStatus.FAILED,
+                                        TriggeredBy.SYSTEM, "Pre-auth webhook timeout"
+                                    )
+                                    payment.response_code = "68"
+                                    db.commit()
+                                    writer.write(self._build_response("0100", "68", msg.de11, frame_length_type))
+                                    await writer.drain()
+                                    continue
+                                finally:
+                                    pending_payments.pop(msg.de11, None)
+
+                                db.refresh(payment)
+                                if payment.status == PaymentStatus.ILP_FULFILLED:
+                                    payment.response_code = "00"
+                                    db.commit()
+                                    writer.write(self._build_response("0100", "00", msg.de11, frame_length_type))
+                                else:
+                                    payment.response_code = "05"
+                                    db.commit()
+                                    writer.write(self._build_response("0100", "05", msg.de11, frame_length_type))
+
+                                await writer.drain()
+
+                            except (WalletResolutionError, InvalidTransitionError, ValueError) as e:
+                                logger.error("Pre-auth error for ASE '%s': %s", ase_name, e)
+                                db.rollback()
+                                writer.write(self._build_response("0100", "96", msg.de11, frame_length_type))
+                                await writer.drain()
+                        continue
+
                     # ── Process payment (0200) ───────────────────────────────
                     async with get_db_session() as db:
                         try:
