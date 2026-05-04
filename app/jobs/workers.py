@@ -1,8 +1,12 @@
 from sqlalchemy.orm import Session
 from app.db import SessionLocal
-from app.models.payment import PaymentTranslation, PaymentStatus, SettlementBatch, BatchStatus
-from datetime import datetime, timezone
+from app.models.payment import (
+    PaymentTranslation, PaymentStatus, SettlementBatch, BatchStatus,
+    DeadLetter,
+)
+from datetime import datetime, timezone, timedelta
 from app.config import settings
+from app.state.machine import transition_payment, TriggeredBy, InvalidTransitionError
 
 
 def run_settlement_job():
@@ -90,5 +94,104 @@ def cleanup_stale_payments():
 
     except Exception as e:
         print(f"Cleanup job failed: {e}")
+    finally:
+        db.close()
+
+
+def retry_dead_letter_payments():
+    """
+    Scheduled job: Retry payments that have failed but are eligible for retry.
+    Moves payments to dead_letter table if retry_count exceeded.
+    """
+    db = SessionLocal()
+    try:
+        from app.server.tcp import tcp_server
+        from app.clients.rafiki_client import RafikiClient
+        from app.translation.core import translate
+        from app.parser.iso8583 import parse_iso8583
+
+        # Find FAILED payments with retry_count < 3 and next_retry_at <= now
+        now = datetime.now(timezone.utc)
+        retryable = (
+            db.query(PaymentTranslation)
+            .filter(
+                PaymentTranslation.status == PaymentStatus.FAILED,
+                PaymentTranslation.retry_count < 3,
+                (PaymentTranslation.next_retry_at == None) | (PaymentTranslation.next_retry_at <= now),
+            )
+            .limit(50)
+            .all()
+        )
+
+        rafiki = RafikiClient()
+        for payment in retryable:
+            try:
+                # Re-attempt: re-parse raw_message and retry translation
+                msg = parse_iso8583(
+                    bytes.fromhex(payment.raw_message),
+                    frame_length_type=2,  # Default, could be from ASE registry
+                )
+
+                result = translate(db, msg, payment.ase_name, settings.payment_ttl_seconds)
+
+                # Retry Rafiki calls
+                rafiki.get_wallet_address(result.wallet_address)
+                incoming = rafiki.create_incoming_payment(
+                    wallet_address=result.wallet_address,
+                    amount_ilp_uint64=result.amount_ilp_uint64,
+                    asset_code=result.asset_code,
+                    asset_scale=result.asset_scale,
+                    expires_at=result.expires_at.isoformat(),
+                    external_ref=payment.stan,
+                )
+                incoming_id = (
+                    incoming.get("data", {})
+                    .get("createReceiver", {})
+                    .get("receiver", {})
+                    .get("id")
+                )
+                outgoing = rafiki.create_outgoing_payment(
+                    wallet_address=result.source_wallet_address,
+                    incoming_payment_url=incoming_id,
+                    amount_ilp_uint64=result.amount_ilp_uint64,
+                    asset_code=result.asset_code,
+                    asset_scale=result.asset_scale,
+                    stan=payment.stan,
+                )
+
+                payment.rafiki_payment_id = str(outgoing)
+                payment.retry_count = 0
+                payment.next_retry_at = None
+                transition_payment(
+                    db, payment.id, PaymentStatus.ILP_PREPARED,
+                    TriggeredBy.SYSTEM, "Retry successful"
+                )
+                print(f"Retried payment {payment.id} (STAN={payment.stan}) — success")
+
+            except Exception as e:
+                payment.retry_count += 1
+                if payment.retry_count >= 3:
+                    # Move to dead-letter
+                    dl = DeadLetter(
+                        payment_id=payment.id,
+                        ase_name=payment.ase_name,
+                        stan=payment.stan,
+                        rrn=payment.rrn,
+                        failure_reason=str(e),
+                        error_type="RETRY_EXCEEDED",
+                    )
+                    db.add(dl)
+                    print(f"Payment {payment.id} moved to dead-letter after {payment.retry_count} retries")
+                else:
+                    # Exponential backoff: 1min, 5min, 15min
+                    backoff_minutes = [1, 5, 15][payment.retry_count - 1]
+                    payment.next_retry_at = now + timedelta(minutes=backoff_minutes)
+                    print(f"Payment {payment.id} retry {payment.retry_count}/3 scheduled for {payment.next_retry_at}")
+
+                db.commit()
+
+    except Exception as e:
+        db.rollback()
+        print(f"Dead-letter retry job failed: {e}")
     finally:
         db.close()

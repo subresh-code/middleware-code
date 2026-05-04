@@ -65,6 +65,8 @@ class PaymentTranslation(Base):
     response_code = Column(String(2), nullable=True)  # DE39
     failure_reason = Column(Text, nullable=True)
     expires_at = Column(DateTime(timezone=True), nullable=True)
+    retry_count = Column(Integer, default=0, nullable=False)  # For dead-letter retries
+    next_retry_at = Column(DateTime(timezone=True), nullable=True)  # Next retry time
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
@@ -104,3 +106,17 @@ class AuditLog(Base):
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     payment = relationship("PaymentTranslation", back_populates="audit_logs")
+
+
+class DeadLetter(Base):
+    __tablename__ = "dead_letter"
+
+    id = Column(Integer, primary_key=True, index=True)
+    payment_id = Column(Integer, ForeignKey("payment_translations.id"), nullable=False, index=True)
+    ase_name = Column(String(100), nullable=False, index=True)
+    stan = Column(String(6), nullable=True, index=True)
+    rrn = Column(String(12), nullable=True, index=True)
+    failure_reason = Column(Text, nullable=True)
+    error_type = Column(String(50), nullable=False)  # e.g. "RAFIKI_TIMEOUT", "PARSE_ERROR"
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    retried_at = Column(DateTime(timezone=True), nullable=True)
