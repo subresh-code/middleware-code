@@ -5,14 +5,10 @@ from contextlib import asynccontextmanager
 import bcrypt
 
 from app.db import SessionLocal
-from app.models.payment import (
-    AseRegistry, PaymentStatus, PaymentTranslation, TriggeredBy,
-    RawMessageLog,
-)
+from app.models.payment import AseRegistry, PaymentStatus, PaymentTranslation, TriggeredBy
 from app.parser.iso8583 import ParseError, encode_iso8583_response, parse_iso8583
 from app.state.machine import InvalidTransitionError, transition_payment
 from app.translation.core import WalletResolutionError, translate, resolve_wallet
-from app.middleware.rate_limiter import check_rate_limit
 
 
 logger = logging.getLogger(__name__)
@@ -35,8 +31,6 @@ class TcpServer:
         # ase_name → current connection count
         self._connection_counts: dict[str, int] = {}
         self._lock = asyncio.Lock()
-        # ase_name → list of (reader, writer) tuples for outbound messages
-        self._connections: dict[str, list[tuple]] = {}
 
     def _make_error_response(self, mti: str, de39: str, stan: str, frame_length_type: int) -> bytes:
         """Build a proper ISO 8583 0210/0410 error response."""
@@ -117,11 +111,6 @@ class TcpServer:
 
             logger.info("ASE '%s' connected from %s", ase_name, peername)
 
-            # Store connection for outbound messages (heartbeat)
-            if ase_name not in self._connections:
-                self._connections[ase_name] = []
-            self._connections[ase_name].append((reader, writer))
-
             # ── Step 4: message loop ──────────────────────────────────────
             try:
                 while True:
@@ -166,42 +155,13 @@ class TcpServer:
                     # ── Parse ────────────────────────────────────────────────
                     try:
                         msg = parse_iso8583(full_frame, frame_length_type)
-                        # Log successful parse to raw_message_logs
-                        async with get_db_session() as db:
-                            log = RawMessageLog(
-                                ase_name=ase_name,
-                                stan=msg.de11 if hasattr(msg, "de11") else None,
-                                rrn=msg.de37 if hasattr(msg, "de37") else None,
-                                mti=msg.mti,
-                                raw_bytes=full_frame.hex().upper(),
-                                parsed_successfully=True,
-                            )
-                            db.add(log)
-                            db.commit()
                     except ParseError as e:
                         logger.warning("ASE '%s' parse error: %s", ase_name, e)
-                        # Log failed parse with raw bytes
-                        async with get_db_session() as db:
-                            log = RawMessageLog(
-                                ase_name=ase_name,
-                                raw_bytes=full_frame.hex().upper(),
-                                parsed_successfully=False,
-                                error_message=str(e),
-                            )
-                            db.add(log)
-                            db.commit()
                         error_response = self._make_error_response(
-                            '0200',  # msg not defined on parse failure
+                            msg.mti if 'msg' in locals() else '0200',
                             "30", "000000", frame_length_type,
                         )
                         writer.write(error_response)
-                        await writer.drain()
-                        continue
-
-                    # ── Rate limit check ─────────────────────────────────
-                    if not check_rate_limit(ase_name):
-                        logger.warning("ASE '%s' rate limit exceeded", ase_name)
-                        writer.write(self._make_error_response(msg.mti, "03", msg.de11, frame_length_type))
                         await writer.drain()
                         continue
 
@@ -429,101 +389,9 @@ class TcpServer:
 
                                 wallet_data = data.get("data", {}).get("walletAddressByUrl")
                                 if not wallet_data:
-                                    writer.write(self._make_error_response(msg.mti, "14", msg.de11, frame_length_type))
+                                    writer.write(self._build_response(msg.mti, "14", msg.de11, frame_length_type))
                                     await writer.drain()
                                     continue
-
-                                # Build response with balance in DE4
-                                # Balance is in UInt64 format, convert to 12-digit DE4
-                                balance_raw = int(wallet_data.get("balance", 0))
-                                asset_scale = wallet_data.get("asset", {}).get("scale", 2)
-                                # Convert UInt64 to display value, then to 12-digit
-                                display_value = balance_raw / (10 ** asset_scale)
-                                de4_balance = f"{int(display_value * 100):012d}"
-
-                                response_fields = {
-                                    "39": "00",
-                                    "11": msg.de11,
-                                    "4": de4_balance,
-                                }
-                                response_mti = "0210" if msg.mti == "0200" else "0110"
-                                try:
-                                    balance_response = encode_iso8583_response(
-                                        mti=response_mti,
-                                        fields=response_fields,
-                                        header_len=frame_length_type,
-                                    )
-                                    writer.write(balance_response)
-                                except Exception:
-                                    writer.write(self._make_error_response(msg.mti, "96", msg.de11, frame_length_type))
-
-                            except WalletResolutionError as e:
-                                logger.warning("Balance inquiry wallet not found: %s", e)
-                                writer.write(self._make_error_response(msg.mti, "14", msg.de11, frame_length_type))
-                            except Exception as e:
-                                logger.error("Balance inquiry error: %s", e)
-                                writer.write(self._make_error_response(msg.mti, "96", msg.de11, frame_length_type))
-
-                            await writer.drain()
-                        continue
-
-                    # ── Handle Mini-Statement (DE3 starts with "38") ─────
-                    if msg.de3 and msg.de3.startswith("38"):
-                        async with get_db_session() as db:
-                            try:
-                                # Query last N payments for this ASE account
-                                from app.models.payment import PaymentTranslation, PaymentStatus
-
-                                statement_payments = (
-                                    db.query(PaymentTranslation)
-                                    .filter(
-                                        PaymentTranslation.ase_name == ase_name,
-                                        PaymentTranslation.mti == "0200",
-                                        PaymentTranslation.status == PaymentStatus.ILP_FULFILLED,
-                                    )
-                                    .order_by(PaymentTranslation.created_at.desc())
-                                    .limit(10)
-                                    .all()
-                                )
-
-                                if not statement_payments:
-                                    writer.write(self._make_error_response(msg.mti, "25", msg.de11, frame_length_type))
-                                    await writer.drain()
-                                    continue
-
-                                # Build mini-statement data for DE48 (additional data)
-                                # Format: each transaction on one line with date, amount, RRN
-                                lines = []
-                                for p in statement_payments:
-                                    date_str = p.created_at.strftime("%m%d") if p.created_at else "0000"
-                                    amount_str = f"{int(p.amount_value * 100):012d}" if p.amount_value else "000000000000"
-                                    rrn = p.rrn or "000000000000"
-                                    lines.append(f"{date_str}{amount_str}{rrn}")
-
-                                de48_data = "|".join(lines)[:255]  # Truncate to 255 chars
-
-                                response_fields = {
-                                    "39": "00",
-                                    "11": msg.de11,
-                                    "48": de48_data,
-                                }
-                                response_mti = "0210" if msg.mti == "0200" else "0110"
-                                try:
-                                    stmt_response = encode_iso8583_response(
-                                        mti=response_mti,
-                                        fields=response_fields,
-                                        header_len=frame_length_type,
-                                    )
-                                    writer.write(stmt_response)
-                                except Exception:
-                                    writer.write(self._make_error_response(msg.mti, "96", msg.de11, frame_length_type))
-
-                            except Exception as e:
-                                logger.error("Mini-statement error: %s", e)
-                                writer.write(self._make_error_response(msg.mti, "96", msg.de11, frame_length_type))
-
-                            await writer.drain()
-                        continue
 
                                 # Build response with balance in DE4
                                 # Balance is in UInt64 format, convert to 12-digit DE4
@@ -557,48 +425,6 @@ class TcpServer:
                                 writer.write(self._build_response(msg.mti, "96", msg.de11, frame_length_type))
 
                             await writer.drain()
-                        continue
-
-
-                    # ── Handle Batch Payment (MTI 0220/0221) ─────
-                    if msg.mti in ("0220", "0221"):
-                        async with get_db_session() as db:
-                            try:
-                                # Batch payments: process multiple transactions from DE48
-                                de48 = getattr(msg, "de48", None)
-                                if not de48:
-                                    writer.write(self._make_error_response(msg.mti, "30", msg.de11, frame_length_type))
-                                    await writer.drain()
-                                    continue
-                                # For simplicity, treat as single payment with batch indicator
-                                payment = PaymentTranslation(
-                                    ase_name=ase_name,
-                                    raw_message=msg.raw_hex,
-                                    mti=msg.mti,
-                                    status=PaymentStatus.RECEIVED,
-                                    currency=msg.de49,
-                                    stan=msg.de11,
-                                    rrn=msg.de37,
-                                    processing_code=msg.de3,
-                                    terminal_id=msg.de41,
-                                )
-                                db.add(payment)
-                                db.commit()
-                                db.refresh(payment)
-                                transition_payment(db, payment.id, PaymentStatus.TRANSLATING, TriggeredBy.ASE_INBOUND, "Batch payment received")
-                                result = translate(db, msg, ase_name, settings.payment_ttl_seconds)
-                                payment.wallet_address = result.wallet_address
-                                payment.amount_ilp_uint64 = result.amount_ilp_uint64
-                                payment.amount_value = result.amount_ilp_uint64 / (10 ** result.asset_scale)
-                                payment.expires_at = result.expires_at
-                                db.commit()
-                                transition_payment(db, payment.id, PaymentStatus.TRANSLATED, TriggeredBy.TRANSLATION_JOB, "Batch translation complete")
-                                writer.write(self._make_error_response(msg.mti, "00", msg.de11, frame_length_type))
-                                await writer.drain()
-                            except Exception as e:
-                                logger.error("Batch payment error: %s", e)
-                                writer.write(self._make_error_response(msg.mti, "96", msg.de11, frame_length_type))
-                                await writer.drain()
                         continue
 
                     # ── Process payment (0200) ───────────────────────────────
@@ -675,12 +501,6 @@ class TcpServer:
                 async with self._lock:
                     self._connection_counts[ase_name] = max(
                         0, self._connection_counts.get(ase_name, 1) - 1)
-                # Remove from connections list
-                if ase_name in self._connections:
-                    conns = self._connections[ase_name]
-                    self._connections[ase_name] = [
-                        (r, w) for (r, w) in conns if w != writer
-                    ]
                 logger.info("ASE '%s' disconnected from %s", ase_name, peername)
 
         except Exception as e:
@@ -691,39 +511,6 @@ class TcpServer:
                 await writer.wait_closed()
             except Exception:
                 pass
-
-
-    async def _send_heartbeat(self, writer, frame_length_type: int):
-        """Send 0800 echo request to ASE as heartbeat."""
-        try:
-            heartbeat = encode_iso8583_response(
-                mti="0800",
-                fields={"11": "000000"},
-                header_len=frame_length_type,
-            )
-            writer.write(heartbeat)
-            await writer.drain()
-        except Exception as e:
-            logger.warning("Failed to send heartbeat: %s", e)
-
-    async def start_heartbeat(self, ase_name: str, interval: float = 30.0):
-        """Periodically send heartbeat to all connections for an ASE."""
-        while True:
-            await asyncio.sleep(interval)
-            if ase_name in self._connections:
-                for (reader, writer) in self._connections[ase_name]:
-                    # Get frame_length_type from ASE registry
-                    from app.db import SessionLocal
-                    from app.models.payment import AseRegistry
-                    db = SessionLocal()
-                    try:
-                        ase = db.query(AseRegistry).filter(
-                            AseRegistry.ase_name == ase_name
-                        ).first()
-                        frame_len = ase.frame_length_type if ase else 2
-                    finally:
-                        db.close()
-                    await self._send_heartbeat(writer, frame_len)
 
     async def start(self):
         from app.config import get_settings
