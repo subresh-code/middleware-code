@@ -93,3 +93,26 @@ class RafikiClient:
             hashlib.sha256,
         ).hexdigest()
         return hmac.compare_digest(expected, signature)
+
+    def cancel_outgoing_payment(self, payment_id: str) -> dict:
+        """Attempt to cancel an outgoing payment in Rafiki (if supported)."""
+        mutation = {
+            "query": """
+                mutation CancelOutgoingPayment($id: String!) {
+                    cancelOutgoingPayment(id: $id) {
+                        payment {
+                            id
+                            state
+                        }
+                    }
+                }
+            """,
+            "variables": {"id": payment_id}
+        }
+        try:
+            resp = self._request_with_retry("POST", "/graphql", json=mutation)
+            return resp.json()
+        except Exception as e:
+            logger = __import__("logging").getLogger(__name__)
+            logger.warning("Could not cancel Rafiki payment %s: %s", payment_id, e)
+            return {}

@@ -177,7 +177,72 @@ class TcpServer:
                         await writer.drain()
                         continue
 
-                    # ── Process payment ───────────────────────────────────────
+                    # ── Handle 0400 Reversal ───────────────────────────────────
+                    if msg.mti == "0400":
+                        async with get_db_session() as db:
+                            # Look up original 0200 by STAN (DE11) + RRN (DE37)
+                            original = (
+                                db.query(PaymentTranslation)
+                                .filter(
+                                    PaymentTranslation.ase_name == ase_name,
+                                    PaymentTranslation.stan == msg.de11,
+                                    PaymentTranslation.rrn == msg.de37,
+                                    PaymentTranslation.mti == "0200",
+                                )
+                                .order_by(PaymentTranslation.created_at.desc())
+                                .first()
+                            )
+                            if not original:
+                                logger.warning(
+                                    "ASE '%s' reversal for unknown STAN=%s RRN=%s",
+                                    ase_name, msg.de11, msg.de37,
+                                )
+                                writer.write(self._build_response("0400", "25", msg.de11, frame_length_type))
+                                await writer.drain()
+                                continue
+
+                            if original.status in (PaymentStatus.SETTLED, PaymentStatus.NOTIFIED):
+                                # Already settled — cannot reverse at middleware layer
+                                writer.write(self._build_response("0400", "39", msg.de11, frame_length_type))
+                                await writer.drain()
+                                continue
+
+                            if original.status == PaymentStatus.FAILED:
+                                # Already failed, reversal not needed
+                                writer.write(self._build_response("0400", "00", msg.de11, frame_length_type))
+                                await writer.drain()
+                                continue
+
+                            # If Rafiki payment was created, attempt to cancel it
+                            if original.rafiki_payment_id:
+                                try:
+                                    rafiki = RafikiClient()
+                                    await rafiki.cancel_outgoing_payment(original.rafiki_payment_id)
+                                except Exception as e:
+                                    logger.warning(
+                                        "Could not cancel Rafiki payment %s: %s",
+                                        original.rafiki_payment_id, e,
+                                    )
+
+                            # Mark original as reversed (FAILED with reason)
+                            try:
+                                transition_payment(
+                                    db, original.id, PaymentStatus.FAILED,
+                                    TriggeredBy.ASE_INBOUND,
+                                    "Reversed by 0400 reversal request",
+                                )
+                                original.response_code = "00"
+                                db.commit()
+                            except InvalidTransitionError:
+                                writer.write(self._build_response("0400", "39", msg.de11, frame_length_type))
+                                await writer.drain()
+                                continue
+
+                            writer.write(self._build_response("0400", "00", msg.de11, frame_length_type))
+                            await writer.drain()
+                            continue
+
+                    # ── Process payment (0200) ───────────────────────────────
                     async with get_db_session() as db:
                         try:
                             # Create payment record with raw fields only
