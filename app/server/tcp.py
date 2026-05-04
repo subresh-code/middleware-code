@@ -5,7 +5,10 @@ from contextlib import asynccontextmanager
 import bcrypt
 
 from app.db import SessionLocal
-from app.models.payment import AseRegistry, PaymentStatus, PaymentTranslation, TriggeredBy
+from app.models.payment import (
+    AseRegistry, PaymentStatus, PaymentTranslation, TriggeredBy,
+    RawMessageLog,
+)
 from app.parser.iso8583 import ParseError, encode_iso8583_response, parse_iso8583
 from app.state.machine import InvalidTransitionError, transition_payment
 from app.translation.core import WalletResolutionError, translate, resolve_wallet
@@ -155,10 +158,32 @@ class TcpServer:
                     # ── Parse ────────────────────────────────────────────────
                     try:
                         msg = parse_iso8583(full_frame, frame_length_type)
+                        # Log successful parse to raw_message_logs
+                        async with get_db_session() as db:
+                            log = RawMessageLog(
+                                ase_name=ase_name,
+                                stan=msg.de11 if hasattr(msg, "de11") else None,
+                                rrn=msg.de37 if hasattr(msg, "de37") else None,
+                                mti=msg.mti,
+                                raw_bytes=full_frame.hex().upper(),
+                                parsed_successfully=True,
+                            )
+                            db.add(log)
+                            db.commit()
                     except ParseError as e:
                         logger.warning("ASE '%s' parse error: %s", ase_name, e)
+                        # Log failed parse with raw bytes
+                        async with get_db_session() as db:
+                            log = RawMessageLog(
+                                ase_name=ase_name,
+                                raw_bytes=full_frame.hex().upper(),
+                                parsed_successfully=False,
+                                error_message=str(e),
+                            )
+                            db.add(log)
+                            db.commit()
                         error_response = self._make_error_response(
-                            msg.mti if 'msg' in locals() else '0200',
+                            '0200',  # msg not defined on parse failure
                             "30", "000000", frame_length_type,
                         )
                         writer.write(error_response)

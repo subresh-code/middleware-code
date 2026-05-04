@@ -120,3 +120,17 @@ class DeadLetter(Base):
     error_type = Column(String(50), nullable=False)  # e.g. "RAFIKI_TIMEOUT", "PARSE_ERROR"
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     retried_at = Column(DateTime(timezone=True), nullable=True)
+
+
+class RawMessageLog(Base):
+    __tablename__ = "raw_message_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    ase_name = Column(String(100), nullable=False, index=True)
+    stan = Column(String(6), nullable=True, index=True)
+    rrn = Column(String(12), nullable=True, index=True)
+    mti = Column(String(4), nullable=True)
+    raw_bytes = Column(Text, nullable=False)  # Hex-encoded raw bytes
+    parsed_successfully = Column(Boolean, default=True, nullable=False)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
