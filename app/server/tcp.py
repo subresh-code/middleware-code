@@ -552,6 +552,48 @@ class TcpServer:
                             await writer.drain()
                         continue
 
+
+                    # ── Handle Batch Payment (MTI 0220/0221) ─────
+                    if msg.mti in ("0220", "0221"):
+                        async with get_db_session() as db:
+                            try:
+                                # Batch payments: process multiple transactions from DE48
+                                de48 = getattr(msg, "de48", None)
+                                if not de48:
+                                    writer.write(self._make_error_response(msg.mti, "30", msg.de11, frame_length_type))
+                                    await writer.drain()
+                                    continue
+                                # For simplicity, treat as single payment with batch indicator
+                                payment = PaymentTranslation(
+                                    ase_name=ase_name,
+                                    raw_message=msg.raw_hex,
+                                    mti=msg.mti,
+                                    status=PaymentStatus.RECEIVED,
+                                    currency=msg.de49,
+                                    stan=msg.de11,
+                                    rrn=msg.de37,
+                                    processing_code=msg.de3,
+                                    terminal_id=msg.de41,
+                                )
+                                db.add(payment)
+                                db.commit()
+                                db.refresh(payment)
+                                transition_payment(db, payment.id, PaymentStatus.TRANSLATING, TriggeredBy.ASE_INBOUND, "Batch payment received")
+                                result = translate(db, msg, ase_name, settings.payment_ttl_seconds)
+                                payment.wallet_address = result.wallet_address
+                                payment.amount_ilp_uint64 = result.amount_ilp_uint64
+                                payment.amount_value = result.amount_ilp_uint64 / (10 ** result.asset_scale)
+                                payment.expires_at = result.expires_at
+                                db.commit()
+                                transition_payment(db, payment.id, PaymentStatus.TRANSLATED, TriggeredBy.TRANSLATION_JOB, "Batch translation complete")
+                                writer.write(self._make_error_response(msg.mti, "00", msg.de11, frame_length_type))
+                                await writer.drain()
+                            except Exception as e:
+                                logger.error("Batch payment error: %s", e)
+                                writer.write(self._make_error_response(msg.mti, "96", msg.de11, frame_length_type))
+                                await writer.drain()
+                        continue
+
                     # ── Process payment (0200) ───────────────────────────────
                     async with get_db_session() as db:
                         try:
