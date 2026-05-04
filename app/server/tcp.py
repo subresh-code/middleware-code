@@ -4,15 +4,11 @@ from contextlib import asynccontextmanager
 
 import bcrypt
 
-from app.models.payment import (
-    AseRegistry, PaymentStatus, PaymentTranslation, TriggeredBy,
-    RawMessageLog,
-)
+from app.db import SessionLocal
+from app.models.payment import AseRegistry, PaymentStatus, PaymentTranslation, TriggeredBy
 from app.parser.iso8583 import ParseError, encode_iso8583_response, parse_iso8583
 from app.state.machine import InvalidTransitionError, transition_payment
-from app.state.pending import pending_payments
-from app.server.handlers import handle_0100, handle_0200, handle_0400, handle_balance
-from app.middleware.rate_limiter import check_rate_limit
+from app.translation.core import WalletResolutionError, translate
 
 
 logger = logging.getLogger(__name__)
@@ -35,8 +31,6 @@ class TcpServer:
         # ase_name → current connection count
         self._connection_counts: dict[str, int] = {}
         self._lock = asyncio.Lock()
-        # ase_name → list of (reader, writer) tuples for outbound messages
-        self._connections: dict[str, list[tuple]] = {}
 
     def _make_error_response(self, mti: str, de39: str, stan: str, frame_length_type: int) -> bytes:
         """Build a proper ISO 8583 0210/0410 error response."""
@@ -58,7 +52,7 @@ class TcpServer:
         bcrypt check runs in thread pool to avoid blocking the event loop.
         """
         registries = db.query(AseRegistry).filter(AseRegistry.active == True).all()
-        loop = asyncio.get_running_loop()
+        loop = asyncio.get_event_loop()
         for registry in registries:
             match = await loop.run_in_executor(
                 None,
@@ -117,11 +111,6 @@ class TcpServer:
 
             logger.info("ASE '%s' connected from %s", ase_name, peername)
 
-            # Store connection for outbound messages (heartbeat)
-            if ase_name not in self._connections:
-                self._connections[ase_name] = []
-            self._connections[ase_name].append((reader, writer))
-
             # ── Step 4: message loop ──────────────────────────────────────
             try:
                 while True:
@@ -162,37 +151,12 @@ class TcpServer:
 
                     # Include header in raw_bytes so parser stores the full frame
                     full_frame = header_bytes + data
-                    msg = None  # Initialize to handle parse failure gracefully
 
                     # ── Parse ────────────────────────────────────────────────
                     try:
                         msg = parse_iso8583(full_frame, frame_length_type)
-
-                        # Log successful parse to raw_message_logs
-                        async with get_db_session() as db:
-                            log = RawMessageLog(
-                                ase_name=ase_name,
-                                stan=msg.de11 if hasattr(msg, "de11") else None,
-                                rrn=msg.de37 if hasattr(msg, "de37") else None,
-                                mti=msg.mti,
-                                raw_bytes=full_frame.hex().upper(),
-                                parsed_successfuly=True,
-                            )
-                            db.add(log)
-                            db.commit()
                     except ParseError as e:
                         logger.warning("ASE '%s' parse error: %s", ase_name, e)
-
-                        # Log failed parse with raw bytes
-                        async with get_db_session() as db:
-                            log = RawMessageLog(
-                                ase_name=ase_name,
-                                raw_bytes=full_frame.hex().upper(),
-                                parsed_successfuly=False,
-                                error_message=str(e),
-                            )
-                            db.add(log)
-                            db.commit()
                         error_response = self._make_error_response(
                             msg.mti if 'msg' in locals() else '0200',
                             "30", "000000", frame_length_type,
@@ -201,53 +165,80 @@ class TcpServer:
                         await writer.drain()
                         continue
 
-                    # ── Rate limit check ────────────────────────
-                    if not check_rate_limit(ase_name):
-                        logger.warning("ASE '%s' rate limit exceeded", ase_name)
-                        writer.write(self._make_error_response(msg.mti, "03", msg.de11, frame_length_type))
-                        await writer.drain()
-                        continue
-
-                    # ── Handle 0800 Network Management (echo/heartbeat) ────
-                    if msg.mti == "0800":
-                        logger.info("ASE '%s' sent 0800 echo request", ase_name)
-                        echo_response = encode_iso8583_response(
-                            mti="0810",
-                            fields={"39": "00", "11": msg.de11},
-                            header_len=frame_length_type,
-                        )
-                        writer.write(echo_response)
-                        await writer.drain()
-                        continue
-
-                    # ── Route to appropriate handler ───────────────────────────
+                    # ── Process payment ───────────────────────────────────────
                     async with get_db_session() as db:
-                        if msg.mti == "0400":
-                            await handle_0400(self, db, msg, ase_name, frame_length_type, writer)
-                        elif msg.mti == "0100":
-                            await handle_0100(self, db, msg, ase_name, settings, frame_length_type, writer)
-                        elif msg.mti == "0200":
-                            await handle_0200(self, db, msg, ase_name, settings, frame_length_type, writer)
-                        elif msg.de3 and msg.de3.startswith("31"):
-                            await handle_balance(self, db, msg, ase_name, frame_length_type, writer)
-                        else:
-                            # Unknown MTI — return format error
-                            writer.write(self._make_error_response(msg.mti, "30", msg.de11, frame_length_type))
+                        try:
+                            # Create payment record with raw fields only
+                            payment = PaymentTranslation(
+                                ase_name=ase_name,
+                                raw_message=msg.raw_hex,
+                                mti=msg.mti,
+                                status=PaymentStatus.RECEIVED,
+                                currency=msg.de49,
+                                stan=msg.de11,
+                                rrn=msg.de37,
+                            )
+                            db.add(payment)
+                            db.commit()
+                            db.refresh(payment)
+
+                            # Transition to TRANSLATING
+                            transition_payment(
+                                db, payment.id,
+                                PaymentStatus.TRANSLATING,
+                                TriggeredBy.ASE_INBOUND,
+                                "Received from ASE",
+                            )
+
+                            # Run translation
+                            result = translate(db, msg, ase_name, settings.payment_ttl_seconds)
+
+                            # Update payment with translation results
+                            payment.wallet_address = result.wallet_address
+                            payment.amount_ilp_uint64 = result.amount_ilp_uint64
+                            payment.amount_value = result.amount_ilp_uint64 / (10 ** result.asset_scale)
+                            payment.expires_at = result.expires_at
+                            db.commit()
+
+                            # Transition to TRANSLATED
+                            transition_payment(
+                                db, payment.id,
+                                PaymentStatus.TRANSLATED,
+                                TriggeredBy.TRANSLATION_JOB,
+                                "Translation complete",
+                            )
+
+                            # Send approved response — DE39=00
+                            response = self._make_error_response(
+                                msg.mti, "00", msg.de11, frame_length_type)
+                            writer.write(response)
+                            await writer.drain()
+
+                        except (WalletResolutionError, InvalidTransitionError, ValueError) as e:
+                            logger.error("Payment processing error for ASE '%s': %s", ase_name, e)
+                            db.rollback()
+                            if 'payment' in locals():
+                                try:
+                                    transition_payment(
+                                        db, payment.id,
+                                        PaymentStatus.FAILED,
+                                        TriggeredBy.SYSTEM,
+                                        str(e),
+                                    )
+                                except Exception:
+                                    pass
+                            error_response = self._make_error_response(
+                                msg.mti if 'msg' in locals() else '0200',
+                                "96", msg.de11 if 'msg' in locals() else "000000", frame_length_type,
+                            )
+                            writer.write(error_response)
                             await writer.drain()
 
             finally:
-                # ── Decrement connection count ───────────────────────
+                # ── Decrement connection count ───────────────────────────────
                 async with self._lock:
                     self._connection_counts[ase_name] = max(
-                        0, self._connection_counts.get(ase_name, 0) - 1
-                    )
-
-                    # Remove from connections list
-                    if ase_name in self._connections:
-                        conns = self._connections[ase_name]
-                        self._connections[ase_name] = [
-                            (r, w) for (r, w) in conns if w != writer
-                        ]
+                        0, self._connection_counts.get(ase_name, 1) - 1)
                 logger.info("ASE '%s' disconnected from %s", ase_name, peername)
 
         except Exception as e:

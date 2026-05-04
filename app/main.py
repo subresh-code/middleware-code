@@ -1,7 +1,7 @@
 import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
-from app.routes import health, inbound, webhook, admin
+from app.routes import health, inbound, webhook
 from app.server.tcp import tcp_server
 from app.config import get_settings
 
@@ -34,4 +34,3 @@ app = FastAPI(
 app.include_router(health.router)
 app.include_router(inbound.router)
 app.include_router(webhook.router)
-app.include_router(admin.router)
