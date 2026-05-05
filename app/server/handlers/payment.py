@@ -168,9 +168,30 @@ async def handle_0200(
             await writer.drain()
             return
 
-        # ── Deposit Liquidity (Funding) ──────────────────────────
+        # ── Wait for 'outgoing_payment.created' webhook ──
+        # Step 9: Middleware waits for Rafiki to say "I'm ready to send money".
+        # This is where we should do the ISO 8583 debit check (DE39=00).
+        event_created = asyncio.Event()
+        pending_payments[msg.de11 + "_created"] = event_created
         try:
-            # We use the outgoing payment ID returned by Rafiki
+            await asyncio.wait_for(event_created.wait(), timeout=30.0)
+        except asyncio.TimeoutError:
+            transition_payment(
+                db, payment.id, PaymentStatus.FAILED,
+                TriggeredBy.SYSTEM, "outgoing_payment.created webhook timeout"
+            )
+            payment.response_code = "68"
+            db.commit()
+            writer.write(self._make_error_response(msg.mti, "68", msg.de11, frame_length_type))
+            await writer.drain()
+            return
+        finally:
+            pending_payments.pop(msg.de11 + "_created", None)
+
+        # ── Deposit Liquidity (Funding) ──────────────────────────
+        # Now that we have received the "created" event and presumably
+        # verified the ISO debit (Step 9), we approve the payment.
+        try:
             outgoing_id = outgoing.get("id") or outgoing.get("url")
             await rafiki.deposit_outgoing_payment_liquidity(outgoing_id)
         except Exception as e:

@@ -8,6 +8,7 @@ from app.models.payment import PaymentTranslation, PaymentStatus
 from app.config import get_settings
 _settings = get_settings()
 from app.clients.rafiki_client import RafikiClient
+from app.state.pending import pending_payments
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 
@@ -51,11 +52,21 @@ async def rafiki_webhook(request: Request, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Payment not found")
 
     try:
-        if event_type == "payment.COMPLETED":
+        if event_type == "outgoing_payment.created":
+            # Step 9: Rafiki is ready. Signal the handler to proceed with ISO debit/liquidity.
+            event = pending_payments.get(external_ref)
+            if event:
+                event.set()
+            return {"status": "ok", "event": event_type, "action": "proceed_to_liquidity"}
+        
+        elif event_type == "outgoing_payment.completed":
             transition_payment(
                 db, payment.id, PaymentStatus.ILP_FULFILLED,
                 TriggeredBy.RAFIKI_WEBHOOK, f"Rafiki event: {event_type}"
             )
+        elif event_type == "incoming_payment.completed":
+            # Optional: Credit receiver via ISO 8583 if not already done
+            pass
         elif event_type == "payment.FAILED":
             transition_payment(
                 db, payment.id, PaymentStatus.ILP_REJECTED,
@@ -64,6 +75,12 @@ async def rafiki_webhook(request: Request, db: Session = Depends(get_db)):
         else:
             # Unknown event — ignore but acknowledge
             return {"status": "ignored", "event": event_type}
+
+        # ── Signal the pending TCP request for final status (completed/failed) ──
+        event = pending_payments.get(external_ref)
+        if event:
+            event.set()
+
     except InvalidTransitionError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

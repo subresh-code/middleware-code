@@ -13,7 +13,7 @@ services:
     environment:
       DATABASE_URL: postgresql://postgres:postgres@db:5432/payments
       REDIS_URL: redis://redis:6379/0
-      RAFIKI_API_URL: http://localhost:3000
+      RAFIKI_API_URL: http://host.docker.internal:3001
       RAFIKI_AUTH_TOKEN: dummy_token_for_now
       RAFIKI_WEBHOOK_SECRET: dummy_secret_for_now
     volumes:
