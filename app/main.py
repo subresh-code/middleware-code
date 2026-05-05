@@ -1,10 +1,12 @@
 import asyncio
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 from app.routes import health, inbound, webhook
 from app.server.tcp import tcp_server
 from app.jobs.scheduler import start_scheduler, stop_scheduler
 from app.config import get_settings
+from app.routes import test_client
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -26,7 +28,6 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         pass
 
-
 app = FastAPI(
     title="Payment Middleware",
     description="Middleware translating ISO 8583 messages to ILP/Rafiki",
@@ -34,6 +35,8 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.mount("/static", StaticFiles(directory="static"), name="static")
 app.include_router(health.router)
 app.include_router(inbound.router)
 app.include_router(webhook.router)
+app.include_router(test_client.router)
