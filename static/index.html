@@ -3,65 +3,131 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ISO 8583 Middleware Tester</title>
+    <title>ISO 8583 Payment Tester</title>
     <style>
-        body { font-family: sans-serif; padding: 20px; background: #f4f4f9; }
-        .container { max-width: 800px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
-        h1 { color: #333; }
-        label { display: block; margin-top: 10px; font-weight: bold; }
-        input, textarea, button { width: 100%; padding: 8px; margin-top: 5px; border: 1px solid #ccc; border-radius: 4px; }
-        button { background: #007bff; color: white; border: none; cursor: pointer; font-size: 16px; }
-        button:hover { background: #0056b3; }
-        pre { background: #eee; padding: 10px; border-radius: 4px; overflow-x: auto; white-space: pre-wrap; word-wrap: break-word; }
-        .section { margin-bottom: 20px; }
+        body { font-family: 'Segoe UI', Tahoma, sans-serif; padding: 20px; background: #eef2f5; color: #333; }
+        .container { max-width: 900px; margin: 0 auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
+        h1 { color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 10px; }
+        h2 { color: #34495e; font-size: 1.2em; margin-top: 25px; }
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
+        .field { display: flex; flex-direction: column; }
+        label { font-size: 0.9em; font-weight: 600; color: #7f8c8d; margin-bottom: 5px; text-transform: uppercase; }
+        input, select { padding: 10px; border: 1px solid #bdc3c7; border-radius: 6px; font-size: 1em; transition: border 0.3s; }
+        input:focus, select:focus { outline: none; border-color: #3498db; box-shadow: 0 0 0 2px #3498db; }
+        button { background: #3498db; color: white; border: none; padding: 15px; font-size: 1.1em; border-radius: 8px; cursor: pointer; margin-top: 20px; width: 100%; transition: background 0.3s; }
+        button:hover { background: #2980b9; }
+        button:disabled { background: #95a5a6; cursor: not-allowed; }
+        pre { background: #2c3e50; color: #ecf0f1; padding: 15px; border-radius: 8px; overflow-x: auto; white-space: pre-wrap; word-wrap: break-word; max-height: 400px; overflow-y: auto; margin-top: 10px; }
+        .status { padding: 10px; border-radius: 6px; margin-bottom: 15px; font-weight: bold; }
+        .status.success { background: #d5f5e9; color: #27ae60; }
+        .status.error { background: #fadbd8; color: #c0392b; }
     </style>
 </head>
 <body>
 
 <div class="container">
-    <h1>ISO 8583 Message Sender</h1>
-    <p>This UI simulates an ASE sending a message to the Middleware TCP Server via a REST proxy.</p>
+    <h1>ISO 8583 Message Simulator</h1>
+    <p style="color: #7f8c8d;">Construct a message below. Clicking "Send" will convert this to binary ISO 8583, send it to the Middleware (TCP), which translates it to ILP and forwards it to Rafiki.</p>
 
-    <div class="section">
-        <label for="mti">Message Type Indicator (MTI)</label>
-        <input type="text" id="mti" value="0200">
+    <div id="status" class="status" style="display:none;"></div>
 
-        <label for="headerLen">Header Length (Bytes)</label>
-        <input type="number" id="headerLen" value="2">
-
-        <label for="fields">ISO 8583 Fields (JSON format)</label>
-        <textarea id="fields" rows="10">
-{
-    "4": "000000015000",
-    "11": "123456",
-    "37": "999999999999",
-    "49": "524",
-    "103": "9800000001"
-}
-        </textarea>
-
-        <button onclick="sendMessage()">Send ISO 8583 Message</button>
+    <h2>Message Header</h2>
+    <div class="grid">
+        <div class="field">
+            <label>MTI (Message Type)</label>
+            <select id="mti">
+                <option value="0200" selected>0200 - Payment</option>
+                <option value="0400">0400 - Reversal</option>
+                <option value="0800">0800 - Echo/Network</option>
+            </select>
+        </div>
+        <div class="field">
+            <label>Header Length (Bytes)</label>
+            <select id="headerLen">
+                <option value="2" selected>2 Bytes</option>
+                <option value="4">4 Bytes</option>
+            </select>
+        </div>
     </div>
 
-    <h2>Response</h2>
-    <pre id="response">Awaiting input...</pre>
+    <h2>Data Elements (DE)</h2>
+    <div class="grid">
+        <div class="field">
+            <label>DE 4 (Amount)</label>
+            <input type="text" id="de4" value="000000015000" placeholder="000000015000 (150.00)">
+        </div>
+        <div class="field">
+            <label>DE 11 (STAN)</label>
+            <input type="text" id="de11" value="123456" placeholder="123456">
+        </div>
+        <div class="field">
+            <label>DE 37 (RRN)</label>
+            <input type="text" id="de37" value="999999999999" placeholder="999999999999">
+        </div>
+        <div class="field">
+            <label>DE 49 (Currency)</label>
+            <input type="text" id="de49" value="524" placeholder="524 (NPR)">
+        </div>
+        <div class="field">
+            <label>DE 3 (Processing Code)</label>
+            <input type="text" id="de3" value="000000" placeholder="000000">
+        </div>
+        <div class="field">
+            <label>DE 41 (Terminal ID)</label>
+            <input type="text" id="de41" value="TERM01" placeholder="TERM01">
+        </div>
+        <div class="field">
+            <label>DE 102 (Source Account)</label>
+            <input type="text" id="de102" value="9800000001" placeholder="9800000001">
+        </div>
+        <div class="field">
+            <label>DE 103 (Destination Account)</label>
+            <input type="text" id="de103" value="9800000002" placeholder="9800000002">
+        </div>
+    </div>
+
+    <button id="sendBtn" onclick="sendMessage()">Send to Rafiki via Middleware</button>
+
+    <h2>Response from Rafiki (via Middleware)</h2>
+    <pre id="response">Awaiting message...</pre>
 </div>
 
 <script>
     async function sendMessage() {
-        const mti = document.getElementById('mti').value;
-        const headerLen = parseInt(document.getElementById('headerLen').value);
-        let fields = {};
-        try {
-            fields = JSON.parse(document.getElementById('fields').value);
-        } catch (e) {
-            document.getElementById('response').innerText = "Error: Invalid JSON in fields.\n" + e;
-            return;
-        }
-
-        const payload = { mti, fields, header_len: headerLen };
+        const btn = document.getElementById('sendBtn');
         const responseEl = document.getElementById('response');
-        responseEl.innerText = "Sending...";
+        const statusEl = document.getElementById('status');
+
+        // Build fields object dynamically
+        const fields = {};
+        const de4 = document.getElementById('de4').value;
+        const de11 = document.getElementById('de11').value;
+        const de37 = document.getElementById('de37').value;
+        const de49 = document.getElementById('de49').value;
+        const de3 = document.getElementById('de3').value;
+        const de41 = document.getElementById('de41').value;
+        const de102 = document.getElementById('de102').value;
+        const de103 = document.getElementById('de103').value;
+
+        if (de4) fields['4'] = de4;
+        if (de11) fields['11'] = de11;
+        if (de37) fields['37'] = de37;
+        if (de49) fields['49'] = de49;
+        if (de3) fields['3'] = de3;
+        if (de41) fields['41'] = de41;
+        if (de102) fields['102'] = de102;
+        if (de103) fields['103'] = de103;
+
+        const payload = {
+            mti: document.getElementById('mti').value,
+            header_len: parseInt(document.getElementById('headerLen').value),
+            fields: fields
+        };
+
+        btn.disabled = true;
+        btn.innerText = 'Sending...';
+        responseEl.innerText = 'Waiting for Rafiki response...';
+        statusEl.style.display = 'none';
 
         try {
             const res = await fetch('/api/test/send', {
@@ -69,10 +135,26 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
             });
+            
             const data = await res.json();
+            
+            if (!res.ok) {
+                throw new Error(data.detail || 'Unknown Error');
+            }
+
             responseEl.innerText = JSON.stringify(data, null, 2);
+            statusEl.innerText = 'Success! Middleware processed the message.';
+            statusEl.className = 'status success';
+            statusEl.style.display = 'block';
+
         } catch (err) {
-            responseEl.innerText = "Fetch Error: " + err;
+            responseEl.innerText = 'Error: ' + err;
+            statusEl.innerText = 'Failed: ' + err;
+            statusEl.className = 'status error';
+            statusEl.style.display = 'block';
+        } finally {
+            btn.disabled = false;
+            btn.innerText = 'Send to Rafiki via Middleware';
         }
     }
 </script>
