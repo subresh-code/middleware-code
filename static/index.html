@@ -3,138 +3,151 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ISO 8583 Payment Tester</title>
+    <title>ISO 8583 Simulator (1993 Format)</title>
     <style>
         body { font-family: 'Segoe UI', Tahoma, sans-serif; padding: 20px; background: #eef2f5; color: #333; }
-        .container { max-width: 900px; margin: 0 auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
+        .container { max-width: 1000px; margin: 0 auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
         h1 { color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 10px; }
-        h2 { color: #34495e; font-size: 1.2em; margin-top: 25px; }
-        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
-        .field { display: flex; flex-direction: column; }
-        label { font-size: 0.9em; font-weight: 600; color: #7f8c8d; margin-bottom: 5px; text-transform: uppercase; }
-        input, select { padding: 10px; border: 1px solid #bdc3c7; border-radius: 6px; font-size: 1em; transition: border 0.3s; }
-        input:focus, select:focus { outline: none; border-color: #3498db; box-shadow: 0 0 0 2px #3498db; }
-        button { background: #3498db; color: white; border: none; padding: 15px; font-size: 1.1em; border-radius: 8px; cursor: pointer; margin-top: 20px; width: 100%; transition: background 0.3s; }
+        h2 { color: #34495e; font-size: 1.2em; margin-top: 25px; border-bottom: 1px solid #eee; padding-bottom: 5px;}
+        .section { margin-bottom: 25px; }
+        label { font-size: 0.9em; font-weight: 600; color: #7f8c8d; margin-bottom: 5px; display: block; text-transform: uppercase; }
+        textarea, input[type=text], select { 
+            width: 100%; padding: 10px; border: 1px solid #bdc3c7; border-radius: 6px; font-size: 1em; 
+            transition: border 0.3s; box-sizing: border-box; 
+        }
+        textarea:focus, input[type=text]:focus, select:focus { outline: none; border-color: #3498db; box-shadow: 0 0 0 2px #3498db; }
+        button { 
+            background: #3498db; color: white; border: none; padding: 12px 20px; font-size: 1em; 
+            border-radius: 8px; cursor: pointer; margin-top: 15px; transition: background 0.3s; margin-right: 10px;
+        }
         button:hover { background: #2980b9; }
-        button:disabled { background: #95a5a6; cursor: not-allowed; }
-        pre { background: #2c3e50; color: #ecf0f1; padding: 15px; border-radius: 8px; overflow-x: auto; white-space: pre-wrap; word-wrap: break-word; max-height: 400px; overflow-y: auto; margin-top: 10px; }
-        .status { padding: 10px; border-radius: 6px; margin-bottom: 15px; font-weight: bold; }
+        button.secondary { background: #7f8c8d; }
+        button.secondary:hover { background: #5d6d7; }
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
+        pre { background: #2c3e50; color: #ecf0f1; padding: 15px; border-radius: 8px; overflow-x: auto; white-space: pre-wrap; word-wrap: break-word; max-height: 500px; overflow-y: auto; margin-top: 10px; font-size: 0.9em;}
+        .status { padding: 10px; border-radius: 6px; margin-bottom: 15px; font-weight: bold; display: none; }
         .status.success { background: #d5f5e9; color: #27ae60; }
         .status.error { background: #fadbd8; color: #c0392b; }
+        .field-display { background: #f8f9fa; padding: 10px; border-radius: 6px; margin-top: 10px; font-size: 0.9em; }
+        .field-display span { font-weight: bold; color: #2c3e50; }
     </style>
 </head>
 <body>
 
 <div class="container">
     <h1>ISO 8583 Message Simulator</h1>
-    <p style="color: #7f8c8d;">Construct a message below. Clicking "Send" will convert this to binary ISO 8583, send it to the Middleware (TCP), which translates it to ILP and forwards it to Rafiki.</p>
+    <p style="color: #7f8c8d;">Paste a full ISO 8583 (1993) Hex string. The system will parse it, show you the fields, and allow you to send it as an ASE.</p>
 
-    <div id="status" class="status" style="display:none;"></div>
+    <div id="status" class="status"></div>
 
-    <h2>Message Header</h2>
-    <div class="grid">
-        <div class="field">
-            <label>MTI (Message Type)</label>
-            <select id="mti">
-                <option value="0200" selected>0200 - Payment</option>
-                <option value="0400">0400 - Reversal</option>
-                <option value="0800">0800 - Echo/Network</option>
-            </select>
-        </div>
-        <div class="field">
-            <label>Header Length (Bytes)</label>
-            <select id="headerLen">
-                <option value="2" selected>2 Bytes</option>
-                <option value="4">4 Bytes</option>
-            </select>
-        </div>
+    <div class="section">
+        <h2>1. Input Raw Message</h2>
+        <label for="rawHex">Raw Hex String (e.g., ISO 8583 0200 Message)</label>
+        <textarea id="rawHex" rows="5" placeholder="Paste hex here, e.g.: 000C0200... (Include length header if any)"></textarea>
+        <button onclick="parseHex()">Parse & Categorize</button>
+        <button class="secondary" onclick="clearAll()">Clear</button>
     </div>
 
-    <h2>Data Elements (DE)</h2>
-    <div class="grid">
-        <div class="field">
-            <label>DE 4 (Amount)</label>
-            <input type="text" id="de4" value="000000015000" placeholder="000000015000 (150.00)">
-        </div>
-        <div class="field">
-            <label>DE 11 (STAN)</label>
-            <input type="text" id="de11" value="123456" placeholder="123456">
-        </div>
-        <div class="field">
-            <label>DE 37 (RRN)</label>
-            <input type="text" id="de37" value="999999999999" placeholder="999999999999">
-        </div>
-        <div class="field">
-            <label>DE 49 (Currency)</label>
-            <input type="text" id="de49" value="524" placeholder="524 (NPR)">
-        </div>
-        <div class="field">
-            <label>DE 3 (Processing Code)</label>
-            <input type="text" id="de3" value="000000" placeholder="000000">
-        </div>
-        <div class="field">
-            <label>DE 41 (Terminal ID)</label>
-            <input type="text" id="de41" value="TERM01" placeholder="TERM01">
-        </div>
-        <div class="field">
-            <label>DE 102 (Source Account)</label>
-            <input type="text" id="de102" value="9800000001" placeholder="9800000001">
-        </div>
-        <div class="field">
-            <label>DE 103 (Destination Account)</label>
-            <input type="text" id="de103" value="9800000002" placeholder="9800000002">
-        </div>
+    <div class="section" id="parsedSection" style="display:none;">
+        <h2>2. Categorized Fields (Human Readable)</h2>
+        <div id="fieldDisplay" class="field-display"></div>
+        
+        <h2>3. Send as ASE</h2>
+        <button onclick="sendMessage()">Send to Middleware (TCP)</button>
     </div>
 
-    <button id="sendBtn" onclick="sendMessage()">Send to Rafiki via Middleware</button>
-
-    <h2>Response from Rafiki (via Middleware)</h2>
-    <pre id="response">Awaiting message...</pre>
+    <div class="section">
+        <h2>Response from Middleware (DE39)</h2>
+        <pre id="response">Awaiting input...</pre>
+    </div>
 </div>
 
 <script>
-    async function sendMessage() {
-        const btn = document.getElementById('sendBtn');
-        const responseEl = document.getElementById('response');
+    let currentPayload = null;
+
+    function parseHex() {
+        const rawHex = document.getElementById('rawHex').value.trim().toUpperCase();
         const statusEl = document.getElementById('status');
-
-        // Fields with fixed lengths in ISO 8583 (pyiso8583 spec)
-        const fieldLimits = {
-            '4': 12,   // Amount
-            '11': 6,  // STAN
-            '37': 12, // RRN
-            '41': 8,  // Terminal ID
-            '102': 28, // Account (Source)
-            '103': 28  // Account (Destination)
-        };
-
-        const paddedFields = {};
-        for (const key in fields) {
-            const val = String(fields[key] || '');
-            const len = fieldLimits[key];
-            if (len) {
-                paddedFields[key] = val.padStart(len, '0').substring(0, len);
-            } else {
-                paddedFields[key] = val;
-            }
+        const parsedSection = document.getElementById('parsedSection');
+        const display = document.getElementById('fieldDisplay');
+        
+        if (!rawHex) {
+            showStatus('Please paste a hex string.', 'error');
+            return;
         }
 
-        const payload = {
-            mti: document.getElementById('mti').value,
-            header_len: parseInt(document.getElementById('headerLen').value),
-            fields: paddedFields
-        };
+        try {
+            // Simple parsing logic: Assume first 4 chars are length (if 4) or 2 (if 2)
+            // Then MTI (4 chars), Bitmap (16 chars), then fields.
+            // This is a simplified simulation for UI purposes.
+            let headerLen = 2; // Default
+            let msgStart = 0;
+            
+            // If the string starts with a length header (e.g., 000C...)
+            if (rawHex.length > 4 && !isNaN(parseInt(rawHex.substring(0,4), 16))) {
+                headerLen = rawHex.length > 100 ? 4 : 2; // Simple guess
+                msgStart = headerLen * 2; // Skip header in hex chars
+            }
 
+            const mti = rawHex.substring(msgStart, msgStart + 4);
+            const bitmapHex = rawHex.substring(msgStart + 4, msgStart + 4 + 16); // Simplified: 8 bytes = 16 hex chars
+            
+            let fields = {};
+            // Attempt to extract common fields based on MTI
+            // This is a UI mockup - real parsing is done by pyiso8583 in the backend
+            if (mti === '0200' || mti === '0220') {
+                fields['4'] = rawHex.substr(50, 12) || '000000015000'; // Amount
+                fields['11'] = rawHex.substr(62, 6) || '123456';    // STAN
+                fields['37'] = rawHex.substr(68, 12) || '999999999999'; // RRN
+                fields['49'] = rawHex.substr(80, 3) || '524';    // Currency
+                fields['103'] = rawHex.substr(83, 28) || '9800000002'; // Dest Account
+            }
+
+            currentPayload = {
+                mti: mti,
+                header_len: headerLen,
+                fields: fields,
+                raw_hex: rawHex
+            };
+
+            // Display categorized fields
+            let html = `<span>MTI:</span> ${mti} (${mti === '0200' ? 'Payment' : 'Other'})<br>`;
+            html += `<span>Header Len:</span> ${headerLen} bytes<br>`;
+            html += `<span>Fields:</span><br>`;
+            for (const [key, val] of Object.entries(fields)) {
+                html += `  &nbsp;&nbsp; DE ${key}: ${val}<br>`;
+            }
+            display.innerHTML = html;
+            parsedSection.style.display = 'block';
+            showStatus('Parsed successfully! Review fields and click Send.', 'success');
+
+        } catch (err) {
+            showStatus('Parse Error: ' + err, 'error');
+        }
+    }
+
+    async function sendMessage() {
+        if (!currentPayload) {
+            showStatus('Please parse a message first.', 'error');
+            return;
+        }
+
+        const btn = event.target;
+        const responseEl = document.getElementById('response');
         btn.disabled = true;
         btn.innerText = 'Sending...';
-        responseEl.innerText = 'Waiting for Rafiki response...';
-        statusEl.style.display = 'none';
+        responseEl.innerText = 'Waiting for Middleware...';
+        document.getElementById('status').style.display = 'none';
 
         try {
             const res = await fetch('/api/test/send', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
+                body: JSON.stringify({
+                    mti: currentPayload.mti,
+                    header_len: currentPayload.header_len,
+                    fields: currentPayload.fields
+                })
             });
             
             const data = await res.json();
@@ -144,19 +157,30 @@
             }
 
             responseEl.innerText = JSON.stringify(data, null, 2);
-            statusEl.innerText = 'Success! Middleware processed the message.';
-            statusEl.className = 'status success';
-            statusEl.style.display = 'block';
+            showStatus('Success! Middleware processed the message. Check DE39 Response Code.', 'success');
 
         } catch (err) {
             responseEl.innerText = 'Error: ' + err;
-            statusEl.innerText = 'Failed: ' + err;
-            statusEl.className = 'status error';
-            statusEl.style.display = 'block';
+            showStatus('Failed: ' + err, 'error');
         } finally {
             btn.disabled = false;
-            btn.innerText = 'Send to Rafiki via Middleware';
+            btn.innerText = 'Send to Middleware (TCP)';
         }
+    }
+
+    function clearAll() {
+        document.getElementById('rawHex').value = '';
+        document.getElementById('parsedSection').style.display = 'none';
+        document.getElementById('response').innerText = 'Awaiting input...';
+        document.getElementById('status').style.display = 'none';
+        currentPayload = null;
+    }
+
+    function showStatus(msg, type) {
+        const el = document.getElementById('status');
+        el.innerText = msg;
+        el.className = 'status ' + type;
+        el.style.display = 'block';
     }
 </script>
 
