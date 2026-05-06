@@ -1,8 +1,9 @@
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from redis import Redis
-from app.config import settings
+from app.config import get_settings
 
+settings = get_settings()
 scheduler = AsyncIOScheduler()
 redis_client = Redis.from_url(settings.redis_url, decode_responses=True)
 

@@ -3,7 +3,9 @@ from sqlalchemy.orm import Session
 from app.db import SessionLocal
 from app.models.payment import PaymentTranslation, PaymentStatus, SettlementBatch, BatchStatus
 from datetime import datetime, timezone
-from app.config import settings
+from app.config import get_settings
+
+settings = get_settings()
 
 logger = logging.getLogger(__name__)
 

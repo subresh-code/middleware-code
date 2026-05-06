@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     tcp_connection_timeout_seconds: int = Field(30, alias="TCP_CONNECTION_TIMEOUT_SECONDS")
     tcp_max_message_bytes: int = Field(4096, alias="TCP_MAX_MESSAGE_BYTES")
 
+    # ── Job Queue ────────────────────────────────────────────────
+    redis_url: str = Field(..., alias="REDIS_URL")
+
     # ── Payment & Settlement ────────────────────────────────────────────────
     payment_ttl_seconds: int = Field(300, alias="PAYMENT_TTL_SECONDS")
 

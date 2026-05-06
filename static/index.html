@@ -98,30 +98,31 @@
         const responseEl = document.getElementById('response');
         const statusEl = document.getElementById('status');
 
-        // Build fields object dynamically
-        const fields = {};
-        const de4 = document.getElementById('de4').value;
-        const de11 = document.getElementById('de11').value;
-        const de37 = document.getElementById('de37').value;
-        const de49 = document.getElementById('de49').value;
-        const de3 = document.getElementById('de3').value;
-        const de41 = document.getElementById('de41').value;
-        const de102 = document.getElementById('de102').value;
-        const de103 = document.getElementById('de103').value;
+        // Fields with fixed lengths in ISO 8583 (pyiso8583 spec)
+        const fieldLimits = {
+            '4': 12,   // Amount
+            '11': 6,  // STAN
+            '37': 12, // RRN
+            '41': 8,  // Terminal ID
+            '102': 28, // Account (Source)
+            '103': 28  // Account (Destination)
+        };
 
-        if (de4) fields['4'] = de4;
-        if (de11) fields['11'] = de11;
-        if (de37) fields['37'] = de37;
-        if (de49) fields['49'] = de49;
-        if (de3) fields['3'] = de3;
-        if (de41) fields['41'] = de41;
-        if (de102) fields['102'] = de102;
-        if (de103) fields['103'] = de103;
+        const paddedFields = {};
+        for (const key in fields) {
+            const val = String(fields[key] || '');
+            const len = fieldLimits[key];
+            if (len) {
+                paddedFields[key] = val.padStart(len, '0').substring(0, len);
+            } else {
+                paddedFields[key] = val;
+            }
+        }
 
         const payload = {
             mti: document.getElementById('mti').value,
             header_len: parseInt(document.getElementById('headerLen').value),
-            fields: fields
+            fields: paddedFields
         };
 
         btn.disabled = true;

@@ -16,6 +16,8 @@ services:
       RAFIKI_API_URL: http://host.docker.internal:3001
       RAFIKI_AUTH_TOKEN: dummy_token_for_now
       RAFIKI_WEBHOOK_SECRET: dummy_secret_for_now
+      RAFIKI_TENANT_ID: 438fa74a-fa7d-4317-9ced-dde32ece1787
+      RAFIKI_ADMIN_API_SECRET: iyIgCprjb9uL8wFckR+pLEkJWMB7FJhgkvqhTQR/964=
     volumes:
       - .:/app
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
